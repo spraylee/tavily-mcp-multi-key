@@ -1,21 +1,26 @@
 {
-  "name": "tavily-mcp",
-  "version": "0.2.21",
-  "mcpName": "io.github.tavily-ai/tavily-mcp",
-  "description": "MCP server for advanced web search using Tavily",
+  "name": "@spraylee/tavily-mcp-multi-key",
+  "version": "0.1.0",
+  "mcpName": "io.github.spraylee/tavily-mcp-multi-key",
+  "description": "Tavily MCP server with multi-key rotation and quota-aware failover",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=20"
+  },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tavily-ai/tavily-mcp.git"
+    "url": "git+https://github.com/spraylee/tavily-mcp-multi-key.git"
   },
   "type": "module",
   "bin": {
-    "tavily-mcp": "build/index.js"
+    "tavily-mcp-multi-key": "build/index.js"
   },
   "files": [
     "build"
   ],
   "scripts": {
     "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "test": "npm run build && node --test test/*.test.mjs",
     "prepare": "npm run build",
     "watch": "tsc --watch",
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
@@ -43,7 +48,7 @@
     "data-extraction",
     "search-integration"
   ],
-  "author": "Tavily",
+  "author": "spraylee",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.26.0",

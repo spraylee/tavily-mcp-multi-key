@@ -3,19 +3,35 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {CallToolRequestSchema, ListToolsRequestSchema, Tool} from "@modelcontextprotocol/sdk/types.js";
-import axios from "axios";
+import axios, { type AxiosRequestConfig } from "axios";
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import { KeyPool, type KeyProbeResult } from "./key-pool.js";
 
 dotenv.config();
 
-const API_KEY = process.env.TAVILY_API_KEY;
-const IS_KEYLESS = !API_KEY;
+const API_KEYS = parseApiKeys();
+const IS_KEYLESS = API_KEYS.length === 0;
 const HUMAN_ID = process.env.TAVILY_HUMAN_ID;
 const SESSION_ID = randomUUID();
+const API_BASE_URL = (process.env.TAVILY_API_BASE_URL || 'https://api.tavily.com').replace(/\/+$/, '');
+
+function parseApiKeys(): string[] {
+  const multipleKeys = process.env.TAVILY_API_KEYS
+    ?.split(/[\n,]/)
+    .map((key) => key.trim())
+    .filter(Boolean);
+
+  if (multipleKeys && multipleKeys.length > 0) {
+    return [...new Set(multipleKeys)];
+  }
+
+  const singleKey = process.env.TAVILY_API_KEY?.trim();
+  return singleKey ? [singleKey] : [];
+}
 
 
 interface TavilyResponse {
@@ -65,12 +81,14 @@ class TavilyClient {
   // Core client properties
   private server: Server;
   private axiosInstance;
+  private readonly keyPool = IS_KEYLESS ? undefined : new KeyPool(API_KEYS);
   private baseURLs = {
-    search: 'https://api.tavily.com/search',
-    extract: 'https://api.tavily.com/extract',
-    crawl: 'https://api.tavily.com/crawl',
-    map: 'https://api.tavily.com/map',
-    research: 'https://api.tavily.com/research'
+    search: `${API_BASE_URL}/search`,
+    extract: `${API_BASE_URL}/extract`,
+    crawl: `${API_BASE_URL}/crawl`,
+    map: `${API_BASE_URL}/map`,
+    research: `${API_BASE_URL}/research`,
+    usage: `${API_BASE_URL}/usage`,
   };
 
   private docsURLs: Record<string, string> = {
@@ -84,8 +102,8 @@ class TavilyClient {
   constructor() {
     this.server = new Server(
       {
-        name: "tavily-mcp",
-        version: "0.2.21",
+        name: "tavily-mcp-multi-key",
+        version: "0.1.0",
       },
       {
         capabilities: {
@@ -98,16 +116,13 @@ class TavilyClient {
       headers: {
         'accept': 'application/json',
         'content-type': 'application/json',
-        ...(IS_KEYLESS
-          ? { 'X-Tavily-Access-Mode': 'keyless', 'X-Client-Source': 'tavily-mcp-keyless' }
-          : { 'Authorization': `Bearer ${API_KEY}`, 'X-Client-Source': 'MCP' }),
         'X-Session-Id': SESSION_ID,
         ...(HUMAN_ID ? { 'X-Human-Id': HUMAN_ID } : {}),
       }
     });
 
     if (IS_KEYLESS) {
-      console.error('[tavily-mcp] no TAVILY_API_KEY set; running in keyless mode. Search and extract are available; other tools will return a message explaining that an API key is required.');
+      console.error('[tavily-mcp-multi-key] no Tavily API key set; running in keyless mode. Search and extract are available; other tools will return a message explaining that an API key is required.');
     }
 
     this.setupHandlers();
@@ -123,6 +138,119 @@ class TavilyClient {
       await this.server.close();
       process.exit(0);
     });
+  }
+
+  private getRequestConfig(apiKey?: string, overrides: AxiosRequestConfig = {}): AxiosRequestConfig {
+    const authHeaders = IS_KEYLESS
+      ? { 'X-Tavily-Access-Mode': 'keyless', 'X-Client-Source': 'tavily-mcp-keyless' }
+      : { 'Authorization': `Bearer ${apiKey}`, 'X-Client-Source': 'MCP' };
+
+    return {
+      ...overrides,
+      headers: {
+        ...authHeaders,
+        ...(overrides.headers as Record<string, string> | undefined),
+      },
+    };
+  }
+
+  private addApiKey<T extends Record<string, any>>(params: T, apiKey?: string): T & { api_key?: string } {
+    return IS_KEYLESS ? params : { ...params, api_key: apiKey };
+  }
+
+  private async initializeKeyPool(): Promise<void> {
+    if (!this.keyPool) {
+      return;
+    }
+
+    await this.keyPool.probe((apiKey) => this.probeKey(apiKey));
+
+    const snapshots = this.keyPool.snapshots();
+    const summary = snapshots.map((snapshot) => {
+      const remaining = snapshot.remaining === undefined ? '' : `, remaining=${snapshot.remaining}`;
+      return `#${snapshot.index} ${snapshot.status}${remaining}`;
+    }).join('; ');
+    console.error(`[tavily-mcp-multi-key] key preflight: ${summary}`);
+  }
+
+  private async probeKey(apiKey: string): Promise<KeyProbeResult> {
+    try {
+      const response = await this.axiosInstance.get(
+        this.baseURLs.usage,
+        this.getRequestConfig(apiKey, { timeout: 5000 }),
+      );
+      const keyUsage = response.data?.key?.usage;
+      const keyLimit = response.data?.key?.limit;
+      const accountUsage = response.data?.account?.plan_usage;
+      const accountLimit = response.data?.account?.plan_limit;
+      const usage = typeof keyLimit === 'number' ? keyUsage : accountUsage;
+      const limit = typeof keyLimit === 'number' ? keyLimit : accountLimit;
+
+      if (typeof usage !== 'number' || (typeof limit !== 'number' && limit !== null)) {
+        return { status: 'active' };
+      }
+
+      if (limit === null) {
+        return { status: 'active', remaining: null };
+      }
+
+      const remaining = Math.max(limit - usage, 0);
+      return {
+        status: remaining === 0 ? 'exhausted' : 'active',
+        remaining,
+      };
+    } catch (error: any) {
+      const status = getErrorStatus(error);
+
+      if (status === 401) {
+        return { status: 'invalid' };
+      }
+
+      if (status === 432 || status === 433) {
+        return { status: 'exhausted', remaining: 0 };
+      }
+
+      if (status === 429) {
+        return { status: 'cooldown', cooldownMs: getRetryAfterMs(error) };
+      }
+
+      return { status: 'unknown' };
+    }
+  }
+
+  private async runWithKey<T>(operation: (apiKey?: string) => Promise<T>): Promise<T> {
+    if (!this.keyPool) {
+      return operation(undefined);
+    }
+
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < this.keyPool.size; attempt += 1) {
+      const apiKey = this.keyPool.nextKey();
+      if (!apiKey) {
+        break;
+      }
+
+      try {
+        const result = await operation(apiKey);
+        this.keyPool.markSuccess(apiKey);
+        return result;
+      } catch (error) {
+        lastError = error;
+        const status = getErrorStatus(error);
+        this.keyPool.markFailure(apiKey, status, getRetryAfterMs(error));
+
+        if (error instanceof KeyBoundError || !isKeyRotationStatus(status)) {
+          throw error;
+        }
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    throw new Error(this.keyPool.unavailableMessage());
   }
 
   private getDefaultParameters(): Record<string, any> {
@@ -550,7 +678,7 @@ class TavilyClient {
           }]
         };
       } catch (error: any) {
-        if (axios.isAxiosError(error)) {
+        if (axios.isAxiosError(error) || getErrorStatus(error) !== undefined) {
           if (isKeylessEnvelope(error.response?.data)) {
             return {
               content: [{
@@ -575,6 +703,15 @@ class TavilyClient {
             isError: true,
           }
         }
+        if (error instanceof Error && error.message.startsWith('No available Tavily API keys.')) {
+          return {
+            content: [{
+              type: "text",
+              text: error.message,
+            }],
+            isError: true,
+          };
+        }
         throw error;
       }
     });
@@ -582,12 +719,17 @@ class TavilyClient {
 
 
   async run(): Promise<void> {
+    await this.initializeKeyPool();
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("Tavily MCP server running on stdio");
+    console.error("Tavily MCP multi-key server running on stdio");
   }
 
   async search(params: any): Promise<TavilyResponse> {
+    return this.runWithKey((apiKey) => this.searchWithKey(params, apiKey));
+  }
+
+  private async searchWithKey(params: any, apiKey?: string): Promise<TavilyResponse> {
       const endpoint = this.baseURLs.search;
 
       const defaults = this.getDefaultParameters();
@@ -609,7 +751,6 @@ class TavilyClient {
         start_date: params.start_date,
         end_date: params.end_date,
         exact_match: params.exact_match,
-        ...(IS_KEYLESS ? {} : { api_key: API_KEY }),
       };
       
       // Apply default parameters
@@ -637,35 +778,52 @@ class TavilyClient {
         }
       }
       
-      const response = await this.axiosInstance.post(endpoint, cleanedParams);
+      const response = await this.axiosInstance.post(
+        endpoint,
+        this.addApiKey(cleanedParams, apiKey),
+        this.getRequestConfig(apiKey),
+      );
       return response.data;
   }
 
   async extract(params: any): Promise<TavilyResponse> {
-    const response = await this.axiosInstance.post(this.baseURLs.extract, {
-      ...params,
-      ...(IS_KEYLESS ? {} : { api_key: API_KEY })
+    return this.runWithKey(async (apiKey) => {
+      const response = await this.axiosInstance.post(
+        this.baseURLs.extract,
+        this.addApiKey(params, apiKey),
+        this.getRequestConfig(apiKey),
+      );
+      return response.data;
     });
-    return response.data;
   }
 
   async crawl(params: any): Promise<TavilyCrawlResponse> {
-    const response = await this.axiosInstance.post(this.baseURLs.crawl, {
-      ...params,
-      ...(IS_KEYLESS ? {} : { api_key: API_KEY })
+    return this.runWithKey(async (apiKey) => {
+      const response = await this.axiosInstance.post(
+        this.baseURLs.crawl,
+        this.addApiKey(params, apiKey),
+        this.getRequestConfig(apiKey),
+      );
+      return response.data;
     });
-    return response.data;
   }
 
   async map(params: any): Promise<TavilyMapResponse> {
-    const response = await this.axiosInstance.post(this.baseURLs.map, {
-      ...params,
-      ...(IS_KEYLESS ? {} : { api_key: API_KEY })
+    return this.runWithKey(async (apiKey) => {
+      const response = await this.axiosInstance.post(
+        this.baseURLs.map,
+        this.addApiKey(params, apiKey),
+        this.getRequestConfig(apiKey),
+      );
+      return response.data;
     });
-    return response.data;
   }
 
   async research(params: any): Promise<TavilyResearchResponse> {
+    return this.runWithKey((apiKey) => this.researchWithKey(params, apiKey));
+  }
+
+  private async researchWithKey(params: any, apiKey?: string): Promise<TavilyResearchResponse> {
     const INITIAL_POLL_INTERVAL = 2000; // 2 seconds in ms
     const MAX_POLL_INTERVAL = 10000; // 10 seconds in ms
     const POLL_BACKOFF_FACTOR = 1.5;
@@ -673,11 +831,10 @@ class TavilyClient {
     const MAX_MINI_MODEL_POLL_DURATION = 300000; // 5 minutes in ms
 
     try {
-      const response = await this.axiosInstance.post(this.baseURLs.research, {
+      const response = await this.axiosInstance.post(this.baseURLs.research, this.addApiKey({
         input: params.input,
         model: params.model || 'auto',
-        ...(IS_KEYLESS ? {} : { api_key: API_KEY })
-      });
+      }, apiKey), this.getRequestConfig(apiKey));
 
       const requestId = response.data.request_id;
       if (!requestId) {
@@ -698,7 +855,8 @@ class TavilyClient {
 
         try {
           const pollResponse = await this.axiosInstance.get(
-            `${this.baseURLs.research}/${requestId}`
+            `${this.baseURLs.research}/${requestId}`,
+            this.getRequestConfig(apiKey),
           );
 
           const status = pollResponse.data.status;
@@ -718,7 +876,7 @@ class TavilyClient {
           if (pollError.response?.status === 404) {
             return { error: 'Research task not found' };
           }
-          throw pollError;
+          throw new KeyBoundError(pollError);
         }
 
         pollInterval = Math.min(pollInterval * POLL_BACKOFF_FACTOR, MAX_POLL_INTERVAL);
@@ -731,18 +889,13 @@ class TavilyClient {
       // result is identical to the polling flow.
       if (error.response?.status === 400 &&
           error.response?.data?.detail?.error_code === 'research_stream_required') {
-        return this.researchViaStream(params);
-      }
-      if (error.response?.status === 401) {
-        throw new Error(`Invalid API key. Documentation: ${this.docsURLs.research}`);
-      } else if (error.response?.status === 429) {
-        throw new Error(`Usage limit exceeded. Documentation: ${this.docsURLs.research}`);
+        return this.researchViaStream(params, apiKey);
       }
       throw error;
     }
   }
 
-  private async researchViaStream(params: any): Promise<TavilyResearchResponse> {
+  private async researchViaStream(params: any, apiKey?: string): Promise<TavilyResearchResponse> {
     const HEADERS_TIMEOUT_MS = 30000;      // time budget for the response to start
     const STREAM_IDLE_TIMEOUT_MS = 300000; // 5 min: tolerate the silent report-generation phase (the report is generated then flushed at once, so no bytes flow meanwhile)
     const maxStreamDuration = params.model === 'mini' ? 300000 : 900000;
@@ -753,20 +906,22 @@ class TavilyClient {
     try {
       response = await this.axiosInstance.post(
         this.baseURLs.research,
-        {
+        this.addApiKey({
           input: params.input,
           model: params.model || 'auto',
-          api_key: API_KEY,
           stream: true
-        },
-        {
+        }, apiKey),
+        this.getRequestConfig(apiKey, {
           responseType: 'stream',
           signal: controller.signal,
           timeout: 0, // lifetime is enforced by the timers below, not by axios
           validateStatus: () => true
-        }
+        }),
       );
     } catch (error: any) {
+      if (isKeyRotationStatus(getErrorStatus(error))) {
+        throw error;
+      }
       const reason = controller.signal.aborted
         ? `no response after ${HEADERS_TIMEOUT_MS / 1000}s`
         : error.message;
@@ -784,6 +939,13 @@ class TavilyClient {
         const parsed = JSON.parse(body);
         detail = JSON.stringify(parsed.detail ?? parsed);
       } catch { /* keep raw body */ }
+      if (isKeyRotationStatus(response.status)) {
+        const error = new Error(`Research stream request failed (HTTP ${response.status}): ${detail}`) as Error & {
+          response?: { status: number; data: unknown };
+        };
+        error.response = { status: response.status, data: detail };
+        throw error;
+      }
       return { error: `Research stream request failed (HTTP ${response.status}): ${detail}. Documentation: ${this.docsURLs.research}` };
     }
 
@@ -889,6 +1051,64 @@ class TavilyClient {
       stream.on('error', finish);
     });
   }
+}
+
+class KeyBoundError extends Error {
+  response?: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'KeyBoundError';
+
+    if (cause && typeof cause === 'object' && 'response' in cause) {
+      this.response = cause.response;
+    }
+  }
+}
+
+function getErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const candidate = error as {
+    status?: unknown;
+    response?: { status?: unknown };
+  };
+  const status = candidate.response?.status ?? candidate.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function getRetryAfterMs(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const candidate = error as {
+    response?: { headers?: Record<string, unknown> };
+  };
+  const retryAfter = candidate.response?.headers?.['retry-after']
+    ?? candidate.response?.headers?.['Retry-After'];
+
+  if (typeof retryAfter === 'number' && Number.isFinite(retryAfter)) {
+    return Math.max(retryAfter * 1000, 0);
+  }
+
+  if (typeof retryAfter !== 'string') {
+    return undefined;
+  }
+
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds)) {
+    return Math.max(seconds * 1000, 0);
+  }
+
+  const timestamp = Date.parse(retryAfter);
+  return Number.isNaN(timestamp) ? undefined : Math.max(timestamp - Date.now(), 0);
+}
+
+function isKeyRotationStatus(status: number | undefined): boolean {
+  return status === 401 || status === 429 || status === 432 || status === 433;
 }
 
 function isKeylessEnvelope(data: any): boolean {

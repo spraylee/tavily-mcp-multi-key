@@ -1,235 +1,273 @@
-# Tavily MCP Server
-![GitHub Repo stars](https://img.shields.io/github/stars/tavily-ai/tavily-mcp?style=social)
-![npm](https://img.shields.io/npm/dt/tavily-mcp)
-![smithery badge](https://smithery.ai/badge/@tavily-ai/tavily-mcp)
+# @spraylee/tavily-mcp-multi-key
 
-The Tavily MCP server provides:
-- search, extract, map, crawl tools
-- Real-time web search capabilities through the tavily-search tool
-- Intelligent data extraction from web pages via the tavily-extract tool
-- Powerful web mapping tool that creates a structured map of website 
-- Web crawler that systematically explores websites 
+基于官方 `tavily-mcp` 的本地 stdio MCP Server，保持官方 5 个工具和功能，同时支持多个 Tavily API Key 的额度感知轮换。
 
+## 支持的工具
 
-### 📚 Helpful Resources
-- [Tutorial](https://medium.com/@dustin_36183/building-a-knowledge-graph-assistant-combining-tavily-and-neo4j-mcp-servers-with-claude-db92de075df9) on combining Tavily MCP with Neo4j MCP server
-- [Tutorial](https://medium.com/@dustin_36183/connect-your-coding-assistant-to-the-web-integrating-tavily-mcp-with-cline-in-vs-code-5f923a4983d1) on integrating Tavily MCP with Cline in VS Code
+- `tavily_search`
+- `tavily_extract`
+- `tavily_crawl`
+- `tavily_map`
+- `tavily_research`
 
-## Remote MCP Server
+工具名称、参数 Schema 和返回格式保持官方实现兼容。
 
-Connect directly to Tavily's remote MCP server instead of running it locally. This provides a seamless experience without requiring local installation or configuration.
+## Key 轮换策略
 
-Simply use the remote MCP server URL with your Tavily API key:
+服务启动时会并行请求 Tavily `/usage`：
 
-``` 
-https://mcp.tavily.com/mcp/?tavilyApiKey=<your-api-key> 
-```
- Get your Tavily API key from [tavily.com](https://www.tavily.com/).
+- 优先根据 `key.usage` 和 `key.limit` 跳过已耗尽的 Key；当 `key.limit` 为 `null` 时，使用 `account.plan_usage` 和 `account.plan_limit`。
+- 按启动时得到的剩余 credits 从高到低建立优先级，优先持续使用额度更多的 Key。
+- 不会在每次请求前刷新余额，也不会在多个 MCP 进程之间共享实时余额。
+- `429` 进入短暂冷却，并尊重 `Retry-After`。
+- `432/433` 标记为额度耗尽并切换到下一个 Key，后续请求不再尝试。
+- `401` 标记为无效。
+- 如果预检因网络问题失败，Key 保持可用，由真实请求惰性识别。
+- `research` 的创建、轮询和流式 fallback 始终使用同一个 Key。
 
-Alternatively, you can pass your API key through an Authorization header if the MCP client supports this:
+Tavily 的额度单位是 credits，不是固定的搜索次数；Research 和高级搜索可能消耗更多 credits。
 
-```
-Authorization: Bearer <your-api-key>
-```
-**Note:** When using the remote MCP, you can specify default parameters for all requests by including a `DEFAULT_PARAMETERS` header containing a JSON object with your desired defaults. Example:
+## 安装与使用
 
+环境要求：Node.js 20+。
 
-```json
-{"include_images":true, "search_depth": "basic", "max_results": 10}
-```
-
-## Connect to Claude Code
-
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) is Anthropic's official CLI tool for Claude. You can add the Tavily MCP server using the `claude mcp add` command. There are two ways to authenticate:
-
-#### Option 1: API Key in URL
-
-Pass your API key directly in the URL. Replace `<your-api-key>` with your actual [Tavily API key](https://www.tavily.com/):
+发布到 npm 后，推荐直接使用 `npx`，无需全局安装：
 
 ```bash
-claude mcp add --transport http tavily https://mcp.tavily.com/mcp/?tavilyApiKey=<your-api-key>
+export TAVILY_API_KEYS="key-a,key-b,key-c"
+npx -y @spraylee/tavily-mcp-multi-key@latest
 ```
 
-#### Option 2: OAuth Authentication Flow
-
-Add the server without an API key in the URL:
+为了避免自动获取未来版本，也可以固定版本：
 
 ```bash
-claude mcp add --transport http tavily https://mcp.tavily.com/mcp
+npx -y @spraylee/tavily-mcp-multi-key@0.1.0
 ```
 
-After adding, you'll need to complete the authentication flow:
-1. Run `claude` to start Claude Code
-2. Type `/mcp` to open the MCP server management
-3. Select the Tavily server and complete the authentication process
-
-**Tip:** Add `--scope user` to either command to make the Tavily MCP server available globally across all your projects:
+如需全局安装：
 
 ```bash
-claude mcp add --transport http --scope user tavily https://mcp.tavily.com/mcp/?tavilyApiKey=<your-api-key>
+pnpm add --global @spraylee/tavily-mcp-multi-key@latest
+tavily-mcp-multi-key
 ```
 
-Once configured, you'll have access to the Tavily search, extract, map, and crawl tools.
+## 配置
 
-## Connect to Cursor
-[![Install MCP Server](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/en/install-mcp?name=tavily-remote-mcp&config=eyJjb21tYW5kIjoibnB4IC15IG1jcC1yZW1vdGUgaHR0cHM6Ly9tY3AudGF2aWx5LmNvbS9tY3AvP3RhdmlseUFwaUtleT08eW91ci1hcGkta2V5PiIsImVudiI6e319)
+多 Key 使用逗号或换行分隔：
 
-Click the ⬆️ Add to Cursor ⬆️ button, this will do most of the work for you but you will still need to edit the configuration to add your API-KEY. You can get a Tavily API key [here](https://www.tavily.com/).
-
-
-once you click the button you should be redirect to Cursor ...
-
-### Step 1
-Click the install button
-
-![](assets/cursor-step1.png)
-
-
-### Step 2
-You should see the MCP is now installed, if the blue slide is not already turned on, manually turn it on. You also need to edit the configuration to include your own Tavily API key.
-![](assets/cursor-step2.png)
-
-### Step 3
-You will then be redirected to your `mcp.json` file where you have to add `your-api-key`.
-
-```json
-{
-  "mcpServers": {
-    "tavily-remote-mcp": {
-      "command": "npx -y mcp-remote https://mcp.tavily.com/mcp/?tavilyApiKey=<your-api-key>",
-      "env": {}
-    }
-  }
-}
+```bash
+export TAVILY_API_KEYS="key-a,key-b,key-c"
 ```
 
-### Remote MCP Server OAuth Flow
+单 Key 旧配置继续支持：
 
-The Tavily Remote MCP server supports secure OAuth authentication, allowing you to connect and authorize seamlessly with compatible clients.
+```bash
+export TAVILY_API_KEY="key-a"
+npx -y @spraylee/tavily-mcp-multi-key@latest
+```
 
-#### How to Set Up OAuth Authentication
+如果同时配置两个变量，非空的 `TAVILY_API_KEYS` 优先。
 
-**A. Using MCP Inspector:**
+官方的 `DEFAULT_PARAMETERS` 和 `TAVILY_HUMAN_ID` 环境变量继续支持。`TAVILY_API_BASE_URL` 仅用于测试或连接兼容 Tavily API 的代理，默认值为 `https://api.tavily.com`。
 
-* Open the MCP Inspector and click "Open Auth Settings".
-* Select the OAuth flow and complete these steps:
-   1. Metadata discovery
-   2. Client registration
-   3. Preparing authorization
-   4. Request authorization and obtain the authorization code
-   5. Token request
-   6. Authentication complete
+### Codex
 
-Once finished, you will receive an access token that lets you securely make authenticated requests to the Tavily Remote MCP server.
+命令行添加：
 
-**B. Using other MCP Clients (Example: Cursor):**
+```bash
+codex mcp add tavily \
+  --env "TAVILY_API_KEYS=key-a,key-b,key-c" \
+  -- npx -y @spraylee/tavily-mcp-multi-key@latest
+```
 
-You can configure your MCP client to use OAuth without including your Tavily API key in the URL. For example, in your `mcp.json`:
+也可以手动编辑 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.tavily]
+command = "npx"
+args = ["-y", "@spraylee/tavily-mcp-multi-key@latest"]
+
+[mcp_servers.tavily.env]
+TAVILY_API_KEYS = "key-a,key-b,key-c"
+```
+
+### Claude Code
+
+命令行添加：
+
+```bash
+claude mcp add --scope user tavily \
+  --env "TAVILY_API_KEYS=key-a,key-b,key-c" \
+  -- npx -y @spraylee/tavily-mcp-multi-key@latest
+```
+
+也可以手动编辑用户级 `~/.claude.json`，或项目级 `.mcp.json`：
 
 ```json
 {
   "mcpServers": {
-    "tavily-remote-mcp": {
-      "command": "npx mcp-remote https://mcp.tavily.com/mcp",
-      "env": {}
-    }
-  }
-}
-```
-
-If you need to clear stored OAuth credentials and reauthenticate, run:
-
-```bash
-rm -rf ~/.mcp-auth
-```
-
-> **Note:**
-> - OAuth authentication is optional. You can still use API key authentication at any time by including your Tavily API key in the URL query parameter (`?tavilyApiKey=...`) or by setting it in the `Authorization` header, as described above.
-
-#### Selecting Which API Key Is Used for OAuth
-
-After successful OAuth authentication, you can control which API key is used by naming it `mcp_auth_default`:
-
-- If you set a key named `mcp_auth_default` in your **personal account**, that key will be used for the auth flow.
-- If you are part of a **team** that has a key named `mcp_auth_default`, that key will be used for the auth flow.
-- If you have **both** a personal key and a team key named `mcp_auth_default`, the **personal key will be prioritized**.
-- If no `mcp_auth_default` key is set, the `default` key in your personal account will be used. If no `default` key is set, the first available key will be used.
-
-## Local MCP 
-
-### Prerequisites 🔧
-
-Before you begin, ensure you have:
-
-- [Tavily API key](https://app.tavily.com/home)
-  - If you don't have a Tavily API key, you can sign up for a free account [here](https://app.tavily.com/home)
-- [Claude Desktop](https://claude.ai/download) or [Cursor](https://cursor.sh)
-- [Node.js](https://nodejs.org/) (v20 or higher)
-  - You can verify your Node.js installation by running:
-    - `node --version`
-- [Git](https://git-scm.com/downloads) installed (only needed if using Git installation method)
-  - On macOS: `brew install git`
-  - On Linux: 
-    - Debian/Ubuntu: `sudo apt install git`
-    - RedHat/CentOS: `sudo yum install git`
-  - On Windows: Download [Git for Windows](https://git-scm.com/download/win)
-
-### Running with NPX 
-
-```bash
-npx -y tavily-mcp@latest 
-```
-
-## Default Parameters Configuration ⚙️
-
-You can set default parameter values for the `tavily-search` tool using the `DEFAULT_PARAMETERS` environment variable. This allows you to configure default search behavior without specifying these parameters in every request.
-
-### Example Configuration
-
-```bash
-export DEFAULT_PARAMETERS='{"include_images": true}'
-```
-
-### Example usage from Client
-```json
-{
-  "mcpServers": {
-    "tavily-mcp": {
+    "tavily": {
+      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "tavily-mcp@latest"],
+      "args": ["-y", "@spraylee/tavily-mcp-multi-key@latest"],
       "env": {
-        "TAVILY_API_KEY": "your-api-key-here",
-        "DEFAULT_PARAMETERS": "{\"include_images\": true, \"max_results\": 15, \"search_depth\": \"advanced\"}"
+        "TAVILY_API_KEYS": "key-a,key-b,key-c"
       }
     }
   }
 }
 ```
 
-## Identifying the End User (Optional)
-
-You can optionally identify the end user on whose behalf requests are being made by setting the `TAVILY_HUMAN_ID` environment variable. When set, Tavily MCP forwards it as the `X-Human-Id` header on every API call, enabling per-user analytics.
-
-This is **entirely optional** — leave it unset and behavior is unchanged.
+### Cursor / Claude Desktop
 
 ```json
 {
   "mcpServers": {
-    "tavily-mcp": {
+    "tavily": {
       "command": "npx",
-      "args": ["-y", "tavily-mcp@latest"],
+      "args": ["-y", "@spraylee/tavily-mcp-multi-key@latest"],
       "env": {
-        "TAVILY_API_KEY": "your-api-key-here",
-        "TAVILY_HUMAN_ID": "your-user-id"
+        "TAVILY_API_KEYS": "key-a,key-b,key-c"
       }
     }
   }
 }
 ```
 
-**Privacy note:** Tavily hashes `human_id` server-side (SHA-256) before storage, so the raw value is never persisted. Even so, prefer opaque identifiers (e.g. an internal user ID) over raw PII like emails when possible.
+不要把真实凭证提交到 Git。可以复制 `.env.example` 到 `.env` 做本地测试；MCP 客户端配置中的环境变量不会写入本项目。
 
-## Acknowledgments ✨
+## 本地开发
 
-- [Model Context Protocol](https://modelcontextprotocol.io) for the MCP specification
-- [Anthropic](https://anthropic.com) for Claude Desktop
+环境要求：Node.js 20+、pnpm。
+
+```bash
+pnpm install
+pnpm build
+pnpm test
+pnpm exec node build/index.js --list-tools
+```
+
+测试使用本地 fake Tavily HTTP 服务，不会调用真实 API，也不需要真实 Key。
+
+查看 MCP Inspector：
+
+```bash
+pnpm inspector
+```
+
+打包预览：
+
+```bash
+pnpm pack --dry-run
+```
+
+本地源码临时接入 Codex，不需要先发布 npm：
+
+```bash
+cd /path/to/tavily-mcp-multi-key
+pnpm build
+export TAVILY_API_KEYS="key-a,key-b"
+codex mcp add tavily-local \
+  --env "TAVILY_API_KEYS=$TAVILY_API_KEYS" \
+  -- node /path/to/tavily-mcp-multi-key/build/index.js
+```
+
+测试完成后移除临时配置：
+
+```bash
+codex mcp remove tavily-local
+```
+
+## 上游维护
+
+本项目保留官方源码作为基线，官方仓库配置为 Git remote `upstream`：
+
+```bash
+git fetch upstream
+git log --oneline upstream/main -5
+```
+
+同步后必须检查 `src/index.ts` 的工具 Schema、认证请求和 `research` 流程，并重新执行：
+
+```bash
+pnpm build
+pnpm test
+```
+
+## 与远程 Tavily MCP 的区别
+
+这是本地 stdio MCP，不包含 Tavily 远程 MCP 的 OAuth 登录流程。它适合 Codex、Cursor 等通过 `command` 启动 MCP 的场景；远程 URL、`mcp-remote` 和 OAuth 不参与本地 Key 轮换。
+
+## 版本与发布
+
+项目使用 SemVer：
+
+- `patch`：修复问题，例：`0.1.0` → `0.1.1`。
+- `minor`：增加向后兼容的功能，例：`0.1.0` → `0.2.0`。
+- `major`：包含不兼容变更，例：`0.1.0` → `1.0.0`。
+
+首次发布前登录 npm 并确认当前账号：
+
+```bash
+npm login
+npm whoami
+```
+
+当前版本 `0.1.0` 可按以下流程首次发布：
+
+```bash
+pnpm build
+pnpm test
+pnpm pack --dry-run
+pnpm publish --access public
+```
+
+后续发布新版本时，先升级版本号。`--no-git-tag-version` 不会自动创建 Git 提交和 Tag，便于检查 diff 后自行提交：
+
+```bash
+# 选择一个：patch、minor 或 major
+pnpm version patch --no-git-tag-version
+git diff -- package.json pnpm-lock.yaml
+pnpm build
+pnpm test
+# 将示例版本替换为本次实际版本
+git add package.json
+git commit -m "release: v0.1.1"
+git tag v0.1.1
+pnpm publish --access public
+```
+
+发布后检查 npm 上的版本：
+
+```bash
+npm view @spraylee/tavily-mcp-multi-key version
+npx -y @spraylee/tavily-mcp-multi-key@latest
+```
+
+如果同时维护 GitHub 个人仓库，可在首次推送前添加个人 remote：
+
+```bash
+git remote add origin git@github.com:spraylee/tavily-mcp-multi-key.git
+git push -u origin main --follow-tags
+```
+
+官方上游仓库继续使用 `upstream`，个人 GitHub 仓库使用 `spraylee`。
+
+如需发布测试版本，可使用 npm dist-tag：
+
+```bash
+pnpm publish --access public --tag next
+```
+
+不要把 API Key 写入 Git、npm 包或发布命令的可公开日志。`pnpm pack --dry-run` 可确认最终包只包含 `build`、README、许可证和包配置。
+
+## 发布前检查
+
+```bash
+pnpm build
+pnpm test
+pnpm pack --dry-run
+git diff --check
+```
+
+在用户确认前，不执行 `git push` 或 `npm publish`。
