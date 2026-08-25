@@ -25,7 +25,7 @@ const API_BASE_URL = (process.env.TAVILY_API_BASE_URL || 'https://api.tavily.com
 // remaining-credits ordering and revives keys that went exhausted mid-month.
 const REPROBE_HOUR = clampInt('TAVILY_REPROBE_HOUR', 0, 23, 5);
 const REPROBE_TZ = process.env.TAVILY_REPROBE_TZ || 'Asia/Shanghai';
-const REPROBE_TICK_MS = 60_000;
+const REPROBE_TICK_MS = clampInt('TAVILY_REPROBE_TICK_MS', 1_000, 3_600_000, 60_000);
 
 // When every key is unavailable, allow one synchronous re-probe at most once
 // per STALE_PROBE_MS so the first request after a quota reset self-heals even
@@ -1208,17 +1208,25 @@ function isKeyRotationStatus(status: number | undefined): boolean {
  * daily re-probe scheduler so "05:00" means 05:00 in the configured zone, not
  * in server-local time. Falls back to server time on invalid zones.
  */
+const dateInZoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
 function dateInZone(date: Date, timeZone: string): Date {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(date);
+  let formatter = dateInZoneFormatters.get(timeZone);
+  if (!formatter) {
+    try {
+      formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false,
+      });
+    } catch {
+      return date; // invalid zone → treat as server-local time
+    }
+    dateInZoneFormatters.set(timeZone, formatter);
+  }
+
+  const parts = formatter.formatToParts(date);
 
   const get = (type: string): number => {
     const part = parts.find((p) => p.type === type);
