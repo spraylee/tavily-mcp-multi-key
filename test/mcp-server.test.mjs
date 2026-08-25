@@ -423,6 +423,39 @@ test("月度额度重置后，exhausted Key 通过探测复活并回到队首", 
   }
 });
 
+test("usage 探测被 429 限流时不影响数据面（key 保持可用）", async () => {
+  const fakeTavily = await startFakeTavily(async (requestRecord, response) => {
+    if (requestRecord.path === "/usage") {
+      // 观测面被限流
+      sendJson(response, 429, { detail: { error: "excessive requests" } });
+      return;
+    }
+    sendJson(response, 200, {
+      query: requestRecord.body?.query,
+      results: [{ title: "Data plane OK", url: "https://example.com", content: "ok", score: 1 }],
+    });
+  });
+
+  try {
+    await withMcpClient(fakeTavily.baseUrl, ["tvly-test-key-aaaa"], async (client) => {
+      // 启动 preflight：/usage 429 → 状态 unknown → key 保持 active
+      const search = await client.callTool({ name: "tavily_search", arguments: { query: "data plane" } });
+      assert.equal(search.isError, undefined);
+      assert.match(search.content[0].text, /Data plane OK/);
+      assert.deepEqual(
+        fakeTavily.requests.filter((r) => r.path === "/search").map((r) => r.apiKey),
+        ["tvly-test-key-aaaa"],
+      );
+
+      const status = await client.callTool({ name: "tavily_key_status", arguments: {} });
+      assert.match(status.content[0].text, /active/);
+      assert.doesNotMatch(status.content[0].text, /cooldown/);
+    });
+  } finally {
+    await fakeTavily.close();
+  }
+});
+
 test("所有 Key 不可用时不做多余探测，refresh 后自愈", async () => {
   let exhausted = true;
   const fakeTavily = await startFakeTavily(async (requestRecord, response) => {

@@ -264,10 +264,12 @@ class TavilyClient {
         return { status: 'exhausted', remaining: 0 };
       }
 
-      if (status === 429) {
-        return { status: 'cooldown', cooldownMs: getRetryAfterMs(error) };
-      }
-
+      // 429 on the usage endpoint rate-limits the *observation plane* only —
+      // search/extract on the same key may still be fine (endpoint-level
+      // limits are independent). Marking the key 'cooldown' here would block
+      // the data plane too, which is wrong. Report 'unknown' so the key keeps
+      // its current state (active on first probe; previous state afterwards)
+      // and real requests surface any actual key-level rate limit.
       return { status: 'unknown' };
     }
   }

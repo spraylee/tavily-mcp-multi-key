@@ -58,14 +58,18 @@ export class KeyPool {
     return this.lastProbeAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - this.lastProbeAt;
   }
 
+  /** Probe every key's usage and refresh ordering. Exposed for status tooling. */
   async probe(probeKey: (key: string) => Promise<KeyProbeResult>): Promise<void> {
     await Promise.all(
       this.records.map(async (record) => {
         try {
           this.applyProbe(record, await probeKey(record.key));
         } catch {
-          record.status = "active";
-          record.availableAt = undefined;
+          // Network-level failure to reach /usage says nothing about the key.
+          // Fresh key: stays active (lazy discovery via real requests).
+          // Previously-sorted pool: state preserved, no reshuffle.
+          record.status = record.status === "cooldown" || record.status === "exhausted" || record.status === "invalid" ? record.status : "active";
+          record.availableAt = record.status === "cooldown" ? record.availableAt : undefined;
         }
       }),
     );
