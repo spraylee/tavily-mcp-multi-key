@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { KeyPool, type KeyProbeResult } from "./key-pool.js";
+import { KeyPool, type KeyProbeResult, type KeyStatusSnapshot } from "./key-pool.js";
 
 dotenv.config();
 
@@ -18,6 +18,27 @@ const IS_KEYLESS = API_KEYS.length === 0;
 const HUMAN_ID = process.env.TAVILY_HUMAN_ID;
 const SESSION_ID = randomUUID();
 const API_BASE_URL = (process.env.TAVILY_API_BASE_URL || 'https://api.tavily.com').replace(/\/+$/, '');
+
+// Daily re-probe schedule. Tavily monthly credits reset on the 1st of each
+// month (calendar-based, server-side truth via GET /usage), so a daily probe
+// at TAVILY_REPROBE_HOUR (default 05:00, TZ-aware) both refreshes the
+// remaining-credits ordering and revives keys that went exhausted mid-month.
+const REPROBE_HOUR = clampInt('TAVILY_REPROBE_HOUR', 0, 23, 5);
+const REPROBE_TZ = process.env.TAVILY_REPROBE_TZ || 'Asia/Shanghai';
+const REPROBE_TICK_MS = 60_000;
+
+// When every key is unavailable, allow one synchronous re-probe at most once
+// per STALE_PROBE_MS so the first request after a quota reset self-heals even
+// if the daily timer never fired.
+const STALE_PROBE_MS = 10 * 60_000;
+
+function clampInt(envName: string, min: number, max: number, fallback: number): number {
+  const parsed = Number.parseInt(process.env[envName] ?? '', 10);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+  return Math.min(Math.max(parsed, min), max);
+}
 
 function parseApiKeys(): string[] {
   const multipleKeys = process.env.TAVILY_API_KEYS
@@ -163,14 +184,47 @@ class TavilyClient {
       return;
     }
 
+    await this.probeAllKeys('startup preflight');
+
+    this.scheduleDailyReprobe();
+  }
+
+  /** Probe every key against GET /usage, refresh ordering, log a summary. */
+  private async probeAllKeys(reason: string): Promise<void> {
+    if (!this.keyPool) {
+      return;
+    }
+
     await this.keyPool.probe((apiKey) => this.probeKey(apiKey));
 
     const snapshots = this.keyPool.snapshots();
     const summary = snapshots.map((snapshot) => {
       const remaining = snapshot.remaining === undefined ? '' : `, remaining=${snapshot.remaining}`;
-      return `#${snapshot.index} ${snapshot.status}${remaining}`;
+      return `#${snapshot.index} ${snapshot.key} ${snapshot.status}${remaining}`;
     }).join('; ');
-    console.error(`[tavily-mcp-multi-key] key preflight: ${summary}`);
+    console.error(`[tavily-mcp-multi-key] key probe (${reason}): ${summary}`);
+  }
+
+  /**
+   * Re-probe all keys once per local calendar day after REPROBE_HOUR.
+   * Implemented as a short-interval check rather than a long setTimeout so a
+   * suspended process (or a clock jump) still fires on the next tick after
+   * the target time passes; the "already fired today" guard prevents repeats.
+   */
+  private scheduleDailyReprobe(): void {
+    let lastProbeDay = dateInZone(new Date(), REPROBE_TZ).getDate();
+
+    const tick = () => {
+      const now = dateInZone(new Date(), REPROBE_TZ);
+      if (now.getHours() >= REPROBE_HOUR && now.getDate() !== lastProbeDay) {
+        lastProbeDay = now.getDate();
+        this.probeAllKeys(`daily re-probe ${REPROBE_HOUR}:00 ${REPROBE_TZ}`).catch((error) => {
+          console.error('[tavily-mcp-multi-key] daily re-probe failed:', error?.message ?? error);
+        });
+      }
+    };
+
+    setInterval(tick, REPROBE_TICK_MS);
   }
 
   private async probeKey(apiKey: string): Promise<KeyProbeResult> {
@@ -228,6 +282,14 @@ class TavilyClient {
     for (let attempt = 0; attempt < this.keyPool.size; attempt += 1) {
       const apiKey = this.keyPool.nextKey();
       if (!apiKey) {
+        // Every key is unavailable. If our knowledge is stale (no probe for a
+        // while — e.g. quotas just reset at month start), re-probe once and
+        // retry before giving up. This makes the first request after a quota
+        // reset self-heal even if the daily timer never fired.
+        if (this.keyPool.lastProbeAgoMs > STALE_PROBE_MS) {
+          await this.probeAllKeys('all keys unavailable — stale probe check');
+          continue;
+        }
         break;
       }
 
@@ -566,6 +628,20 @@ class TavilyClient {
             required: ["input"]
           }
         },
+        {
+          name: "tavily_key_status",
+          description: "Show the current state of the configured Tavily API key pool: per-key status (active/cooldown/exhausted/invalid), masked key, remaining credits, and when the pool was last probed. Optionally pass refresh=true to re-probe all keys against GET /usage before reporting (costs no search credits).",
+          inputSchema: {
+            type: "object",
+            properties: {
+              refresh: {
+                type: "boolean",
+                description: "Re-probe all keys against the usage endpoint before reporting",
+                default: false
+              }
+            }
+          }
+        },
       ];
       return { tools };
     });
@@ -661,6 +737,21 @@ class TavilyClient {
               content: [{
                 type: "text",
                 text: formatResearchResults(researchResponse)
+              }]
+            };
+
+          case "tavily_key_status":
+            if (args.refresh === true) {
+              await this.probeAllKeys('tavily_key_status refresh');
+            }
+            return {
+              content: [{
+                type: "text",
+                text: formatKeyStatus(
+                  this.keyPool ? this.keyPool.snapshots() : [],
+                  this.keyPool ? this.keyPool.lastProbedAt : 0,
+                  { reprobeHour: REPROBE_HOUR, reprobeTz: REPROBE_TZ },
+                )
               }]
             };
 
@@ -1111,6 +1202,43 @@ function isKeyRotationStatus(status: number | undefined): boolean {
   return status === 401 || status === 429 || status === 432 || status === 433;
 }
 
+/**
+ * Convert a Date to a wall-clock Date in the given IANA time zone. The result
+ * is only meaningful for calendar predicates (getDate/getHours) — used by the
+ * daily re-probe scheduler so "05:00" means 05:00 in the configured zone, not
+ * in server-local time. Falls back to server time on invalid zones.
+ */
+function dateInZone(date: Date, timeZone: string): Date {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+
+  const get = (type: string): number => {
+    const part = parts.find((p) => p.type === type);
+    return part ? Number(part.value) : 0;
+  };
+
+  const shifted = new Date(
+    get('year'),
+    get('month') - 1,
+    get('day'),
+    get('hour') % 24,
+    get('minute'),
+    get('second'),
+  );
+  if (Number.isNaN(shifted.getTime())) {
+    return date;
+  }
+  return shifted;
+}
+
 function isKeylessEnvelope(data: any): boolean {
   // Recognises the Tavily API's recoverable-error envelope shape.
   // Used for keyless rate-limit caps and endpoints that require an API key.
@@ -1232,6 +1360,36 @@ function formatResearchResults(response: TavilyResearchResponse): string {
   return response.content || 'No research results available';
 }
 
+function formatKeyStatus(
+  snapshots: KeyStatusSnapshot[],
+  lastProbedAt: number,
+  schedule: { reprobeHour: number; reprobeTz: string },
+): string {
+  if (snapshots.length === 0) {
+    return 'Key pool is empty (keyless mode or no TAVILY_API_KEYS configured).';
+  }
+
+  const lines: string[] = ['Tavily key pool status:'];
+  for (const snapshot of snapshots) {
+    const remaining = snapshot.remaining === undefined
+      ? 'unknown'
+      : snapshot.remaining === null
+        ? 'unlimited'
+        : String(snapshot.remaining);
+    const cooldown = snapshot.status === 'cooldown' && snapshot.availableAt !== undefined
+      ? `, available in ${Math.max(Math.ceil((snapshot.availableAt - Date.now()) / 1000), 0)}s`
+      : '';
+    lines.push(`#${snapshot.index} ${snapshot.key} — ${snapshot.status}, remaining=${remaining}${cooldown}`);
+  }
+
+  const lastProbed = lastProbedAt === 0
+    ? 'never'
+    : `${Math.max(Math.round((Date.now() - lastProbedAt) / 1000), 0)}s ago`;
+  lines.push(`Last probed: ${lastProbed}`);
+  lines.push(`Daily re-probe: ${String(schedule.reprobeHour).padStart(2, '0')}:00 ${schedule.reprobeTz}`);
+  return lines.join('\n');
+}
+
 function listTools(): void {
   const tools = [
     {
@@ -1253,6 +1411,10 @@ function listTools(): void {
     {
       name: "tavily_research",
       description: "Performs comprehensive research on any topic or question by gathering information from multiple sources. Supports different research depths ('mini' for narrow tasks, 'pro' for broad research, 'auto' for automatic selection). Ideal for in-depth analysis, report generation, and answering complex questions requiring synthesis of multiple sources."
+    },
+    {
+      name: "tavily_key_status",
+      description: "Shows the current state of the configured Tavily API key pool: per-key status, masked key, remaining credits, and when the pool was last probed. Optionally refreshes by re-probing GET /usage."
     }
   ];
 

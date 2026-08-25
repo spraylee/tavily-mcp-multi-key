@@ -123,7 +123,7 @@ test("启动预检会跳过已耗尽 Key", async () => {
       const tools = await client.listTools();
       assert.deepEqual(
         tools.tools.map((tool) => tool.name),
-        ["tavily_search", "tavily_extract", "tavily_crawl", "tavily_map", "tavily_research"],
+        ["tavily_search", "tavily_extract", "tavily_crawl", "tavily_map", "tavily_research", "tavily_key_status"],
       );
 
       const result = await client.callTool({
@@ -330,6 +330,145 @@ test("research 轮询失败不会在其他 Key 上重复创建任务", async () 
           .filter((request) => request.path === "/research" || request.path === "/research/research-1")
           .map((request) => request.apiKey),
         ["key-a", "key-a"],
+      );
+    });
+  } finally {
+    await fakeTavily.close();
+  }
+});
+
+test("tavily_key_status 报告脱敏 Key 与探测时间，refresh=true 会重新探测", async () => {
+  const fakeTavily = await startFakeTavily(usageBehavior({
+    "tvly-test-key-aaaa": { usage: 100, limit: 1000 },
+    "tvly-test-key-bbbb": { usage: 500, limit: 1000 },
+  }));
+
+  try {
+    await withMcpClient(fakeTavily.baseUrl, ["tvly-test-key-aaaa", "tvly-test-key-bbbb"], async (client) => {
+      const result = await client.callTool({
+        name: "tavily_key_status",
+        arguments: { refresh: true },
+      });
+
+      assert.equal(result.isError, undefined);
+      const text = result.content[0].text;
+      // Keys are masked (prefix 8 + last 4), raw keys must not leak.
+      assert.doesNotMatch(text, /tvly-test-key-aaaa/);
+      assert.doesNotMatch(text, /tvly-test-key-bbbb/);
+      assert.match(text, /#1 tvly-tes\.\.\.aaaa — active, remaining=900/);
+      assert.match(text, /#2 tvly-tes\.\.\.bbbb — active, remaining=500/);
+      assert.match(text, /Last probed: \d+s ago/);
+      assert.match(text, /Daily re-probe: 05:00 Asia\/Shanghai/);
+      // refresh=true triggers a second probe round on top of startup preflight
+      assert.equal(
+        fakeTavily.requests.filter((request) => request.path === "/usage").length,
+        4,
+      );
+    });
+  } finally {
+    await fakeTavily.close();
+  }
+});
+
+test("月度额度重置后，exhausted Key 通过探测复活并回到队首", async () => {
+  let keyAUsage = 1000;
+  const fakeTavily = await startFakeTavily(async (requestRecord, response) => {
+    if (requestRecord.path === "/usage") {
+      sendJson(response, 200, {
+        key: { usage: requestRecord.apiKey === "tvly-test-key-aaaa" ? keyAUsage : 100, limit: 1000 },
+        account: { plan_usage: 0, plan_limit: 1000 },
+      });
+      return;
+    }
+
+    if (requestRecord.path === "/search" && requestRecord.apiKey === "tvly-test-key-aaaa" && keyAUsage === 1000) {
+      sendJson(response, 432, { detail: { error: "quota exhausted" } });
+      return;
+    }
+
+    sendJson(response, 200, {
+      query: requestRecord.body?.query,
+      results: [{ title: "Revived", url: "https://example.com", content: "ok", score: 1 }],
+    });
+  });
+
+  try {
+    await withMcpClient(fakeTavily.baseUrl, ["tvly-test-key-aaaa", "tvly-test-key-bbbb"], async (client) => {
+      // Startup probe: aaaa exhausted (0 left), bbbb has 900 → search uses bbbb.
+      const first = await client.callTool({ name: "tavily_search", arguments: { query: "first" } });
+      assert.equal(first.isError, undefined);
+      assert.deepEqual(
+        fakeTavily.requests.filter((r) => r.path === "/search").map((r) => r.apiKey),
+        ["tvly-test-key-bbbb"],
+      );
+
+      // Month resets: quota is back on aaaa.
+      keyAUsage = 0;
+
+      // Status refresh revives aaaa; with 1000 left it sorts back to #1.
+      const status = await client.callTool({ name: "tavily_key_status", arguments: { refresh: true } });
+      assert.match(status.content[0].text, /#1 tvly-tes\.\.\.aaaa — active, remaining=1000/);
+      assert.match(status.content[0].text, /#2 tvly-tes\.\.\.bbbb — active, remaining=900/);
+
+      // Next search goes to the revived aaaa.
+      const second = await client.callTool({ name: "tavily_search", arguments: { query: "second" } });
+      assert.equal(second.isError, undefined);
+      assert.equal(
+        fakeTavily.requests.filter((r) => r.path === "/search").map((r) => r.apiKey)[1],
+        "tvly-test-key-aaaa",
+      );
+    });
+  } finally {
+    await fakeTavily.close();
+  }
+});
+
+test("所有 Key 不可用时不做多余探测，refresh 后自愈", async () => {
+  let exhausted = true;
+  const fakeTavily = await startFakeTavily(async (requestRecord, response) => {
+    if (requestRecord.path === "/usage") {
+      const usage = exhausted ? 1000 : 0;
+      sendJson(response, 200, {
+        key: { usage, limit: 1000 },
+        account: { plan_usage: usage, plan_limit: 1000 },
+      });
+      return;
+    }
+
+    if (requestRecord.path === "/search" && exhausted) {
+      sendJson(response, 432, { detail: { error: "quota exhausted" } });
+      return;
+    }
+
+    sendJson(response, 200, {
+      query: requestRecord.body?.query,
+      results: [{ title: "Self-healed", url: "https://example.com", content: "ok", score: 1 }],
+    });
+  });
+
+  try {
+    await withMcpClient(fakeTavily.baseUrl, ["tvly-test-key-aaaa"], async (client) => {
+      // Startup probe marks the only key exhausted. Search fails; probe
+      // knowledge is fresh (<10min) so the lazy re-probe guard must NOT fire.
+      const first = await client.callTool({ name: "tavily_search", arguments: { query: "first" } });
+      assert.equal(first.isError, true);
+      assert.match(first.content[0].text, /No available Tavily API keys/);
+      assert.equal(
+        fakeTavily.requests.filter((r) => r.path === "/usage").length,
+        1,
+      ); // startup only — no extra probe, no /search hit
+      assert.equal(fakeTavily.requests.filter((r) => r.path === "/search").length, 0);
+
+      // Quota resets server-side; explicit refresh revives the pool.
+      exhausted = false;
+      const status = await client.callTool({ name: "tavily_key_status", arguments: { refresh: true } });
+      assert.match(status.content[0].text, /#1 tvly-tes\.\.\.aaaa — active, remaining=1000/);
+
+      const second = await client.callTool({ name: "tavily_search", arguments: { query: "second" } });
+      assert.equal(second.isError, undefined);
+      assert.deepEqual(
+        fakeTavily.requests.filter((r) => r.path === "/search").map((r) => r.apiKey),
+        ["tvly-test-key-aaaa"],
       );
     });
   } finally {

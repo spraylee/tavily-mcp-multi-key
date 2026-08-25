@@ -8,6 +8,7 @@ export interface KeyProbeResult {
 
 export interface KeyStatusSnapshot {
   index: number;
+  key: string;
   status: KeyStatus;
   remaining?: number | null;
   availableAt?: number;
@@ -23,8 +24,17 @@ interface KeyRecord {
 
 const DEFAULT_COOLDOWN_MS = 30_000;
 
+/** Mask a key for logging/display: keep prefix and last 4 chars. */
+export function maskKey(key: string): string {
+  if (key.length <= 8) {
+    return `${key.slice(0, 2)}****`;
+  }
+  return `${key.slice(0, 8)}...${key.slice(-4)}`;
+}
+
 export class KeyPool {
   private readonly records: KeyRecord[];
+  private lastProbeAt = 0;
 
   constructor(keys: string[], private readonly cooldownMs = DEFAULT_COOLDOWN_MS) {
     this.records = [...new Set(keys.map((key) => key.trim()).filter(Boolean))].map((key, index) => ({
@@ -36,6 +46,16 @@ export class KeyPool {
 
   get size(): number {
     return this.records.length;
+  }
+
+  /** Timestamp (ms epoch) of the last completed probe(); 0 if never probed. */
+  get lastProbedAt(): number {
+    return this.lastProbeAt;
+  }
+
+  /** Milliseconds since the last completed probe(); Infinity if never. */
+  get lastProbeAgoMs(): number {
+    return this.lastProbeAt === 0 ? Number.POSITIVE_INFINITY : Date.now() - this.lastProbeAt;
   }
 
   async probe(probeKey: (key: string) => Promise<KeyProbeResult>): Promise<void> {
@@ -50,10 +70,15 @@ export class KeyPool {
       }),
     );
 
+    // Sort by remaining credits (desc). Probe failures leave remaining
+    // untouched (undefined = never learned), so a flaky probe does not
+    // reshuffle a previously-sorted pool.
     this.records.sort((left, right) => {
       const remainingDifference = this.remainingRank(right) - this.remainingRank(left);
       return remainingDifference || left.configuredOrder - right.configuredOrder;
     });
+
+    this.lastProbeAt = Date.now();
   }
 
   nextKey(): string | undefined {
@@ -93,6 +118,9 @@ export class KeyPool {
     }
 
     if (status === 432 || status === 433) {
+      // Exhausted for now, but the monthly quota resets on the 1st of each
+      // month. A later probe() can flip this back to active — keep remaining=0
+      // so the sort still deprioritizes it until then.
       record.status = "exhausted";
       record.availableAt = undefined;
       record.remaining = 0;
@@ -108,6 +136,7 @@ export class KeyPool {
   snapshots(): KeyStatusSnapshot[] {
     return this.records.map((record, index) => ({
       index: index + 1,
+      key: maskKey(record.key),
       status: this.currentStatus(record),
       ...(record.remaining === undefined ? {} : { remaining: record.remaining }),
       ...(record.availableAt === undefined ? {} : { availableAt: record.availableAt }),

@@ -20,12 +20,25 @@
 - 按启动时得到的剩余 credits 从高到低建立优先级，优先持续使用额度更多的 Key。
 - 不会在每次请求前刷新余额，也不会在多个 MCP 进程之间共享实时余额。
 - `429` 进入短暂冷却，并尊重 `Retry-After`。
-- `432/433` 标记为额度耗尽并切换到下一个 Key，后续请求不再尝试。
+- `432/433` 标记为额度耗尽并切换到下一个 Key，后续请求不再尝试；额度按自然月重置（每月 1 号），重新探测后会自动复活。
 - `401` 标记为无效。
 - 如果预检因网络问题失败，Key 保持可用，由真实请求惰性识别。
 - `research` 的创建、轮询和流式 fallback 始终使用同一个 Key。
 
 Tavily 的额度单位是 credits，不是固定的搜索次数；Research 和高级搜索可能消耗更多 credits。
+
+### 定期重排与自愈
+
+- **每日重排**：默认每天 05:00（`TAVILY_REPROBE_TZ`，默认 `Asia/Shanghai`）重新探测所有 Key 的 `/usage` 并按剩余额度重排。`TAVILY_REPROBE_HOUR`（0–23）可改小时。跨设备共用 Key 时，这保证优先级不至于长期失真。
+- **月度重置自愈**：探测到的 remaining 来自服务端真相，月度额度重置后 exhausted Key 会自动复活并重新参与排序，无需重启进程。
+- **兜底 re-probe**：当所有 Key 都不可用时，如果距上次探测已超过 10 分钟，会先做一次同步 re-probe 再放弃——即使定时器从未触发，额度重置后的第一个请求也能自愈。
+
+### tavily_key_status 工具
+
+新增 `tavily_key_status` 工具（不消耗搜索 credits）：
+
+- 报告每个 Key 的状态（active/cooldown/exhausted/invalid）、脱敏 Key（`tvly-dev...vxPK` 格式）、剩余额度和冷却剩余时间。
+- 传 `refresh: true` 先重新探测 `/usage` 再报告，用于手动触发恢复。
 
 ## 安装与使用
 
