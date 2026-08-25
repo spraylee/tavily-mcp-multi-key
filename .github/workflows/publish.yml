@@ -7,12 +7,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write
+  id-token: write # Required for OIDC trusted publishing
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: npm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,7 +20,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest # trusted publishing requires npm >= 11.5.1
 
       - name: Install dependencies
         run: npm ci || npm install
@@ -31,12 +33,10 @@ jobs:
           npm run build
           npm test
 
-      - name: Publish to npm
+      - name: Publish to npm (OIDC trusted publishing)
         run: |
           if [ "$(npm view @spraylee/tavily-mcp-multi-key version)" = "$(node -p "require('./package.json').version")" ]; then
             echo "::warning::npm 上该版本已存在，跳过发布（如需重发请先升 version）"
             exit 0
           fi
-          npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --provenance --access public || npm publish --access public
