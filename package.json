@@ -1,6 +1,6 @@
 {
   "name": "@spraylee/tavily-mcp-multi-key",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "mcpName": "io.github.spraylee/tavily-mcp-multi-key",
   "description": "Tavily MCP server with multi-key rotation and quota-aware failover",
   "packageManager": "pnpm@11.9.0",

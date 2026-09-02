@@ -33,6 +33,15 @@ Tavily 的额度单位是 credits，不是固定的搜索次数；Research 和�
 - **月度重置自愈**：探测到的 remaining 来自服务端真相，月度额度重置后 exhausted Key 会自动复活并重新参与排序，无需重启进程。
 - **兜底 re-probe**：当所有 Key 都不可用时，如果距上次探测已超过 10 分钟，会先做一次同步 re-probe 再放弃——即使定时器从未触发，额度重置后的第一个请求也能自愈。
 
+### 进程生命周期（不会变成孤儿进程）
+
+宿主（Cursor / CodeBuddy / Claude Code 等）退出后，server 保证跟着退出，不再累积孤儿进程吃内存（[#2](https://github.com/spraylee/tavily-mcp-multi-key/issues/2)）：
+
+- **stdin EOF 即退出**：宿主关闭 stdio 管道时立即退出（SDK 的 StdioServerTransport 自身不监听 EOF）。
+- **SIGTERM / SIGINT / SIGHUP 干净退出**：宿主清理子进程最常用 SIGTERM，此前只处理 SIGINT 导致进程残留。
+- **孤儿自查**：每 60 秒检查一次父进程（`TAVILY_ORPHAN_CHECK_MS` 可调，`0` 禁用）——进程的父 PID 只会在原父进程死亡后被内核改写（过继给 launchd / systemd），一旦变化即证明宿主已死，立即退出。这覆盖了 stdin fd 被无关进程继承、EOF 永不到达的极端场景。
+- **定时器全部 `unref()`**：每日重排与孤儿自查的定时器不会独自维持事件循环，进程可以自然退出。
+
 ### tavily_key_status 工具
 
 新增 `tavily_key_status` 工具（不消耗搜索 credits）：

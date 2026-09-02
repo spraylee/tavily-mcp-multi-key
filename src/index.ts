@@ -32,6 +32,18 @@ const REPROBE_TICK_MS = clampInt('TAVILY_REPROBE_TICK_MS', 1_000, 3_600_000, 60_
 // if the daily timer never fired.
 const STALE_PROBE_MS = 10 * 60_000;
 
+// Orphan self-check cadence: if the parent process died, we get re-parented
+// (to launchd's PID 1 on macOS, a systemd --user subreaper on Linux, or a
+// container init) and should exit instead of lingering. TAVILY_ORPHAN_CHECK_MS=0
+// disables the check entirely.
+const ORPHAN_CHECK_INTERVAL_MS = clampInt('TAVILY_ORPHAN_CHECK_MS', 0, 3_600_000, 60_000);
+
+// Earliest-possible parent snapshot: a process's parent can only ever change
+// via re-parenting after the parent dies, so any later change to process.ppid
+// is proof the host is gone. Taken at module load (before the startup probe's
+// network round-trip widens the race window).
+const INITIAL_PPID = process.ppid;
+
 function clampInt(envName: string, min: number, max: number, fallback: number): number {
   const parsed = Number.parseInt(process.env[envName] ?? '', 10);
   if (Number.isNaN(parsed)) {
@@ -102,6 +114,7 @@ class TavilyClient {
   // Core client properties
   private server: Server;
   private axiosInstance;
+  private shuttingDown = false;
   private readonly keyPool = IS_KEYLESS ? undefined : new KeyPool(API_KEYS);
   private baseURLs = {
     search: `${API_BASE_URL}/search`,
@@ -155,10 +168,11 @@ class TavilyClient {
       console.error("[MCP Error]", error);
     };
 
-    process.on('SIGINT', async () => {
-      await this.server.close();
-      process.exit(0);
-    });
+    // Hosts clean up stdio children with SIGTERM far more often than SIGINT;
+    // SIGHUP covers terminal/session death. Without these the process leaks.
+    process.on('SIGTERM', () => void this.shutdown('SIGTERM'));
+    process.on('SIGINT', () => void this.shutdown('SIGINT'));
+    process.on('SIGHUP', () => void this.shutdown('SIGHUP'));
   }
 
   private getRequestConfig(apiKey?: string, overrides: AxiosRequestConfig = {}): AxiosRequestConfig {
@@ -224,7 +238,11 @@ class TavilyClient {
       }
     };
 
-    setInterval(tick, REPROBE_TICK_MS);
+    const timer = setInterval(tick, REPROBE_TICK_MS);
+    // unref so this long-lived timer does not keep the event loop (and the
+    // process) alive on its own — the server should exit when the host closes
+    // stdin, not when the timer stops firing (which is never).
+    timer.unref?.();
   }
 
   private async probeKey(apiKey: string): Promise<KeyProbeResult> {
@@ -815,7 +833,48 @@ class TavilyClient {
     await this.initializeKeyPool();
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
+
+    // Lifecycle safety net so this stdio server never outlives its host
+    // (fixes orphan-process accumulation, see issue #2):
+    //
+    // 1. stdin EOF means the host has closed our pipe — nothing more can
+    //    arrive, so exit immediately. The SDK's StdioServerTransport does not
+    //    listen for 'end'/'close' itself, and host quality varies: Cursor,
+    //    CodeBuddy & friends may just walk away without sending any signal.
+    //    Without this hook the process can be kept alive indefinitely by
+    //    timers/sockets even after the host is gone.
+    process.stdin.on('end', () => void this.shutdown('stdin end'));
+    process.stdin.on('close', () => void this.shutdown('stdin close'));
+
+    // 2. Low-frequency orphan self-check: when the host process dies, we get
+    //    re-parented (ppid changes from the snapshot taken at module load).
+    //    No host will ever write to our stdin again — exit instead of
+    //    lingering. This also covers the case where the stdin fd was inherited
+    //    by another process, so EOF never arrives.
+    const orphanCheck = setInterval(() => {
+      if (process.ppid !== INITIAL_PPID) {
+        void this.shutdown('orphaned (parent exited)');
+      }
+    }, ORPHAN_CHECK_INTERVAL_MS);
+    orphanCheck.unref?.();
+
     console.error("Tavily MCP multi-key server running on stdio");
+  }
+
+  private async shutdown(reason: string): Promise<void> {
+    // Guard against re-entrant shutdown (e.g. stdin 'end' followed by
+    // SIGTERM while server.close() is still in flight).
+    if (this.shuttingDown) {
+      return;
+    }
+    this.shuttingDown = true;
+    try {
+      await this.server.close();
+    } catch {
+      // ignore close errors during shutdown
+    }
+    console.error(`[tavily-mcp-multi-key] shutting down (${reason})`);
+    process.exit(0);
   }
 
   async search(params: any): Promise<TavilyResponse> {
