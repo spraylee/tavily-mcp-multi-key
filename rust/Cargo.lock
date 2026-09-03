@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "tavily-mcp-multi-key"
-version = "0.3.0-alpha.1"
+version = "0.3.0"
 dependencies = [
  "axum",
  "chrono",

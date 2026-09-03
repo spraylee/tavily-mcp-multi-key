@@ -1,6 +1,6 @@
 {
   "name": "@spraylee/tavily-mcp-multi-key",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Tavily MCP server with multi-key rotation — prebuilt Rust binary, zero JS runtime deps. Same tools, same schemas, 96% less memory.",
   "license": "MIT",
   "repository": {
@@ -10,12 +10,16 @@
   "bin": {
     "tavily-mcp-multi-key": "npm/launcher.js"
   },
+  "scripts": {
+    "postinstall": "node npm/postinstall.js"
+  },
   "files": [
     "npm/launcher.js",
+    "npm/postinstall.js",
     "npm/README.md",
     "bin/",
     "README.md",
-    "LICENSE"
+    "LICENCE"
   ],
   "engines": {
     "node": ">=16"
