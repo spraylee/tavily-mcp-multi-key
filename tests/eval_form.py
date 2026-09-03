@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-VERSION = "v0.4.0"
+VERSION = "v0.4.1"
 TARGET = "x86_64-unknown-linux-gnu"
 
 

@@ -56,9 +56,9 @@ TAVILY_API_KEYS="key1,key2" sh -c 'eval "$(curl -fsSL https://github.com/sprayle
 想固定某个版本（CI、复现、镜像场景），给 bootstrap 设环境变量即可：
 
 ```text
-TAVILY_MCP_VERSION=v0.4.0          # 留空 = 自动跟随最新；设置 vX.Y.Z = 固定版本
+TAVILY_MCP_VERSION=v0.4.1          # 留空 = 自动跟随最新；设置 vX.Y.Z = 固定版本
 TAVILY_MCP_REPOSITORY=spraylee/tavily-mcp-multi-key
-TAVILY_MCP_LATEST_API_URL=...      # 覆盖"查询最新版本"的 API 地址（默认 GitHub）
+TAVILY_MCP_LATEST_PROBE_URL=...   # 覆盖"探测最新版本"的地址（默认 GitHub releases/latest）
 ```
 
 ### 直接运行本地缓存的二进制
@@ -121,7 +121,7 @@ SHA256SUMS
 |---|---|---|
 | `TAVILY_MCP_VERSION` | 空（自动跟随最新） | 固定版本时设为 `vX.Y.Z` |
 | `TAVILY_MCP_REPOSITORY` | `spraylee/tavily-mcp-multi-key` | GitHub `owner/repository` |
-| `TAVILY_MCP_LATEST_API_URL` | GitHub releases/latest API | 查询最新版本的 API 地址（测试/镜像用） |
+| `TAVILY_MCP_LATEST_PROBE_URL` | GitHub releases/latest 重定向 | 探测最新版本的地址（测试/镜像用）；不走 api.github.com，无配额限制 |
 | `TAVILY_MCP_RELEASE_BASE_URL` | 对应 GitHub Release URL | 私有镜像或本地测试下载地址 |
 | `TAVILY_MCP_CACHE_DIR` | `$XDG_CACHE_HOME` 或 `~/.cache` 下的缓存目录 | 本地二进制缓存位置 |
 | `TAVILY_MCP_FORCE_DOWNLOAD` | `0` | 设为 `1` 强制重新下载 |

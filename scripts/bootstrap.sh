@@ -7,16 +7,16 @@
 # untouched for the JSON-RPC channel. A literal `curl ... | sh` pipe instead
 # feeds the script through stdin and would steal the MCP channel.
 #
-# Version policy: when TAVILY_MCP_VERSION is empty (default) the script checks
-# the GitHub API for the newest release on every launch and installs it on
-# first sight; offline launches reuse the last installed version. Set
-# TAVILY_MCP_VERSION=vX.Y.Z to pin an exact release instead.
+# Version policy: when TAVILY_MCP_VERSION is empty (default) the script probes
+# the latest release through the releases/latest 302 redirect (no api.github.com
+# quota is consumed) and installs it on first sight; offline launches reuse the
+# last installed version. Set TAVILY_MCP_VERSION=vX.Y.Z to pin a release.
 
 set -eu
 
 REPOSITORY="${TAVILY_MCP_REPOSITORY:-spraylee/tavily-mcp-multi-key}"
 VERSION="${TAVILY_MCP_VERSION:-}"
-LATEST_API_URL="${TAVILY_MCP_LATEST_API_URL:-https://api.github.com/repos/${REPOSITORY}/releases/latest}"
+LATEST_PROBE_URL="${TAVILY_MCP_LATEST_PROBE_URL:-https://github.com/${REPOSITORY}/releases/latest/download/SHA256SUMS}"
 CACHE_ROOT="${TAVILY_MCP_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME:-.}/.cache}/spraylee/tavily-mcp-multi-key}"
 FORCE_DOWNLOAD="${TAVILY_MCP_FORCE_DOWNLOAD:-0}"
 OFFLINE="${TAVILY_MCP_OFFLINE:-0}"
@@ -61,13 +61,11 @@ validate_version() {
 }
 
 query_latest_version() {
-  latest_json=$(curl -fsSL --retry 2 --retry-delay 1 "$LATEST_API_URL" 2>/dev/null || true)
-  if [ -n "$latest_json" ]; then
-    printf '%s' "$latest_json" |
-      grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
-      head -1 |
-      cut -d '"' -f 4
-  fi
+  redirect=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$LATEST_PROBE_URL" 2>/dev/null || true)
+  [ -n "$redirect" ] || return 0
+  printf '%s\n' "$redirect" |
+    grep -oE 'releases/download/v[0-9]+\.[0-9]+\.[0-9]+[^/]*/' |
+    grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?'
 }
 
 resolve_version() {
@@ -82,7 +80,7 @@ resolve_version() {
     return
   fi
 
-  # API unreachable (offline/proxy down): reuse the last installed version.
+  # Probe unreachable (offline/proxy down): reuse the last installed version.
   last_version_file="${CACHE_ROOT}/last-version"
   if [ -r "$last_version_file" ]; then
     VERSION=$(awk 'NR == 1 { print $1; exit }' "$last_version_file")
@@ -91,7 +89,7 @@ resolve_version() {
     validate_version
     return
   fi
-  fail "cannot determine the latest release and no cached version exists (${LATEST_API_URL})"
+  fail "cannot determine the latest release and no cached version exists (${LATEST_PROBE_URL})"
 }
 
 resolve_version

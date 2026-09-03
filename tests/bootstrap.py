@@ -26,7 +26,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "bootstrap.sh"
 BINARY = REPO / "target" / "release" / "tavily-mcp-multi-key"
-VERSION = "v0.4.0"
+VERSION = "v0.4.1"
 TARGET = "x86_64-unknown-linux-gnu"
 PLATFORM_TARGETS = {
     "Linux x64": TARGET,
@@ -38,6 +38,29 @@ PLATFORM_TARGETS = {
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *_args):
         pass
+
+    def do_GET(self):
+        # GitHub-style latest-download redirect: 302 whose Location embeds
+        # the resolved release tag. The version probe parses this Location.
+        if self.path == "/releases/latest/download/SHA256SUMS":
+            tag = self.server.latest_tag  # type: ignore[attr-defined]
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"/releases/download/{tag}/SHA256SUMS",
+            )
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+def start_server(directory: Path):
+    handler = lambda *args, **kwargs: QuietHandler(*args, directory=str(directory), **kwargs)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.latest_tag = VERSION  # type: ignore[attr-defined]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
 
 
 def request(proc: subprocess.Popen[str], payload: dict, timeout: float = 30) -> dict:
@@ -56,14 +79,6 @@ def request(proc: subprocess.Popen[str], payload: dict, timeout: float = 30) -> 
         raise AssertionError("MCP response timeout")
     finally:
         selector.close()
-
-
-def start_server(directory: Path):
-    handler = lambda *args, **kwargs: QuietHandler(*args, directory=str(directory), **kwargs)
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
 
 
 def start_process(argv: list[str], env: dict[str, str]) -> subprocess.Popen[str]:
@@ -152,12 +167,6 @@ def main() -> None:
         shutil.copy2(SCRIPT, release / "bootstrap.sh")
         archives = make_release_archive(release, VERSION, PLATFORM_TARGETS)
 
-        # GitHub-style latest-release API endpoint served as a static file.
-        api_dir = root / "api" / "releases"
-        api_dir.mkdir(parents=True)
-        api_file = api_dir / "latest"
-        api_file.write_text(json.dumps({"tag_name": VERSION}))
-
         server, thread = start_server(root)
         base = f"http://127.0.0.1:{server.server_port}"
         release_base = f"{base}/release"
@@ -237,12 +246,13 @@ def main() -> None:
         auto_env = {
             **env,
             "TAVILY_MCP_VERSION": "",
-            "TAVILY_MCP_LATEST_API_URL": f"{base}/api/releases/latest",
+            "TAVILY_MCP_LATEST_PROBE_URL": f"{base}/releases/latest/download/SHA256SUMS",
             "TAVILY_MCP_CACHE_DIR": str(root / "auto-cache"),
             "TAVILY_MCP_RELEASE_BASE_URL": release_base,
         }
 
-        # First launch with no cache: resolves the API version and installs.
+        # First launch with no cache: the probe follows the 302 redirect,
+        # parses the tag from Location, and installs that version.
         auto_proc, _ = run_once(auto_env)
         try:
             close_cleanly(auto_proc)
@@ -255,9 +265,10 @@ def main() -> None:
 
         # New release appears upstream: next launch installs it and drops the
         # old version directory (the exec'd binary serves as the "running" one).
-        NEW_VERSION = "v0.4.1"
+        major = int(VERSION.lstrip("v").split(".")[0])
+        NEW_VERSION = f"v{major + 1}.0.0"
         make_release_archive(release, NEW_VERSION, PLATFORM_TARGETS)
-        api_file.write_text(json.dumps({"tag_name": NEW_VERSION}))
+        server.latest_tag = NEW_VERSION  # type: ignore[attr-defined]
         upgrade_env = {**auto_env, "TAVILY_MCP_CACHE_DIR": str(root / "auto-cache")}
         upgraded, _ = run_once(upgrade_env)
         try:
@@ -270,7 +281,7 @@ def main() -> None:
         assert not (root / "auto-cache" / VERSION).exists(), "old version directory was not dropped"
 
         # API down but cache present: falls back to the last installed version.
-        offline_env = {**auto_env, "TAVILY_MCP_LATEST_API_URL": "http://127.0.0.1:1/nope"}
+        offline_env = {**auto_env, "TAVILY_MCP_LATEST_PROBE_URL": "http://127.0.0.1:1/nope"}
         fallback, _ = run_once(offline_env)
         try:
             close_cleanly(fallback)
