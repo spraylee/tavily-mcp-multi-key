@@ -189,16 +189,27 @@ async fn orphan_watchdog(initial_ppid: u32, interval_ms: u64, shutdown: watch::S
 }
 
 /// SIGTERM / SIGINT / SIGHUP → clean shutdown (issue #2 loop).
+/// Windows has no POSIX signals; CTRL+C/CTRL+BREAK map to the interrupt path.
 async fn signal_watch(shutdown: watch::Sender<bool>) {
-    use tokio::signal::unix::{signal, SignalKind};
-    let Ok(mut sigterm) = signal(SignalKind::terminate()) else { return };
-    let Ok(mut sigint) = signal(SignalKind::interrupt()) else { return };
-    let Ok(mut sighup) = signal(SignalKind::hangup()) else { return };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else { return };
+        let Ok(mut sigint) = signal(SignalKind::interrupt()) else { return };
+        let Ok(mut sighup) = signal(SignalKind::hangup()) else { return };
 
-    tokio::select! {
-        _ = sigterm.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGTERM)"),
-        _ = sigint.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGINT)"),
-        _ = sighup.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGHUP)"),
+        tokio::select! {
+            _ = sigterm.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGTERM)"),
+            _ = sigint.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGINT)"),
+            _ = sighup.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGHUP)"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => eprintln!("[tavily-mcp-multi-key] shutting down (ctrl-c)"),
+            Err(err) => eprintln!("[tavily-mcp-multi-key] signal watch error: {err}"),
+        }
     }
     let _ = shutdown.send(true);
 }
