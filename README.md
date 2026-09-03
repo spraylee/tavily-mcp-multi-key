@@ -2,6 +2,8 @@
 
 基于官方 `tavily-mcp` 的本地 stdio MCP Server，保持官方 5 个工具和功能，同时支持多个 Tavily API Key 的额度感知轮换。
 
+> **v0.3.0 起为 Rust 实现**：npm 包内含预编译二进制（linux/darwin/win32 × x64/arm64），`npx` 用法完全不变。相比旧 Node 版：冷启动 1446ms→5ms，常驻内存 208MB→7.5MB。工具 Schema 与 TS 版字节级对齐（parity 测试保证），TS 源码保留在本仓库 `src/` 供对照。
+
 ## 支持的工具
 
 - `tavily_search`
@@ -9,8 +11,37 @@
 - `tavily_crawl`
 - `tavily_map`
 - `tavily_research`
+- `tavily_key_status`（多 key 版新增：查看 key 池状态/余额，`refresh=true` 强制重探测）
 
 工具名称、参数 Schema 和返回格式保持官方实现兼容。
+
+## 安装与使用
+
+```bash
+# 直接跑（推荐）
+TAVILY_API_KEYS="key1,key2" npx -y @spraylee/tavily-mcp-multi-key
+
+# 单 key 兼容
+TAVILY_API_KEY="key1" npx -y @spraylee/tavily-mcp-multi-key
+```
+
+MCP 客户端配置示例（stdio）：
+
+```json
+{
+  "mcpServers": {
+    "tavily": {
+      "command": "npx",
+      "args": ["-y", "@spraylee/tavily-mcp-multi-key@latest"],
+      "env": {
+        "TAVILY_API_KEYS": "key1,key2"
+      }
+    }
+  }
+}
+```
+
+无 Key 时自动进入 keyless 模式（search/extract 可用，额度由 Tavily keyless 政策决定）。
 
 ## Key 轮换策略
 
@@ -23,273 +54,65 @@
 - `432/433` 标记为额度耗尽并切换到下一个 Key，后续请求不再尝试；额度按自然月重置（每月 1 号），重新探测后会自动复活。
 - `401` 标记为无效。
 - 如果预检因网络问题失败，Key 保持可用，由真实请求惰性识别。
+- `/usage` 端点自身被限流（429）时只影响观测面，不会误封数据面正常的 Key。
 - `research` 的创建、轮询和流式 fallback 始终使用同一个 Key。
 
 Tavily 的额度单位是 credits，不是固定的搜索次数；Research 和高级搜索可能消耗更多 credits。
 
 ### 定期重排与自愈
 
-- **每日重排**：默认每天 05:00（`TAVILY_REPROBE_TZ`，默认 `Asia/Shanghai`）重新探测所有 Key 的 `/usage` 并按剩余额度重排。`TAVILY_REPROBE_HOUR`（0–23）可改小时。跨设备共用 Key 时，这保证优先级不至于长期失真。
-- **月度重置自愈**：探测到的 remaining 来自服务端真相，月度额度重置后 exhausted Key 会自动复活并重新参与排序，无需重启进程。
-- **兜底 re-probe**：当所有 Key 都不可用时，如果距上次探测已超过 10 分钟，会先做一次同步 re-probe 再放弃——即使定时器从未触发，额度重置后的第一个请求也能自愈。
+- 每日 `TAVILY_REPROBE_HOUR`（默认 05:00，时区 `TAVILY_REPROBE_TZ`，默认 Asia/Shanghai）重排 key 优先级
+- 月初额度重置后自动复活 exhausted key（以 `/usage` 服务端真相为准）
+- 全部 key 不可用且探测信息超过 10 分钟时，兜底补一次探测再放弃
 
-### 进程生命周期（不会变成孤儿进程）
+### 进程生命周期（issue #2）
 
-宿主（Cursor / CodeBuddy / Claude Code 等）退出后，server 保证跟着退出，不再累积孤儿进程吃内存（[#2](https://github.com/spraylee/tavily-mcp-multi-key/issues/2)）：
+宿主退出后 server 保证跟着退出，四层防护：
 
-- **stdin EOF 即退出**：宿主关闭 stdio 管道时立即退出（SDK 的 StdioServerTransport 自身不监听 EOF）。
-- **SIGTERM / SIGINT / SIGHUP 干净退出**：宿主清理子进程最常用 SIGTERM，此前只处理 SIGINT 导致进程残留。
-- **孤儿自查**：每 60 秒检查一次父进程（`TAVILY_ORPHAN_CHECK_MS` 可调，`0` 禁用）——进程的父 PID 只会在原父进程死亡后被内核改写（过继给 launchd / systemd），一旦变化即证明宿主已死，立即退出。这覆盖了 stdin fd 被无关进程继承、EOF 永不到达的极端场景。
-- **定时器全部 `unref()`**：每日重排与孤儿自查的定时器不会独自维持事件循环，进程可以自然退出。
+1. stdin EOF / 传输关闭 → 立即退出
+2. SIGTERM / SIGINT / SIGHUP → 统一干净退出
+3. 孤儿自查：启动时快照父进程 PID，发现变化（re-parent）即退出（`TAVILY_ORPHAN_CHECK_MS=0` 可禁用，默认 60s 一次）
+4. 后台任务（每日重排等）不阻止进程退出
 
-### tavily_key_status 工具
+## 环境变量
 
-新增 `tavily_key_status` 工具（不消耗搜索 credits）：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `TAVILY_API_KEYS` | - | 多 key，逗号或换行分隔 |
+| `TAVILY_API_KEY` | - | 单 key（`TAVILY_API_KEYS` 优先） |
+| `TAVILY_API_BASE_URL` | `https://api.tavily.com` | API 地址（测试用） |
+| `TAVILY_REPROBE_HOUR` | `5` | 每日重排小时（0-23） |
+| `TAVILY_REPROBE_TZ` | `Asia/Shanghai` | 重排时区 |
+| `TAVILY_REPROBE_TICK_MS` | `60000` | 重排调度检查间隔 |
+| `TAVILY_ORPHAN_CHECK_MS` | `60000` | 孤儿自查间隔（0=禁用） |
+| `DEFAULT_PARAMETERS` | - | 搜索默认参数 JSON 覆盖 |
+| `TAVILY_HUMAN_ID` | - | 请求头 X-Human-Id |
 
-- 报告每个 Key 的状态（active/cooldown/exhausted/invalid）、脱敏 Key（`tvly-dev...vxPK` 格式）、剩余额度和冷却剩余时间。
-- 传 `refresh: true` 先重新探测 `/usage` 再报告，用于手动触发恢复。
+## 平台支持
 
-## 安装与使用
+npm 包内置预编译二进制：
 
-环境要求：Node.js 20+。
+| 平台 | 目录 |
+|---|---|
+| Linux x64 / arm64 | `bin/linux-x64` `bin/linux-arm64` |
+| macOS arm64 / x64 | `bin/darwin-arm64` `bin/darwin-x64` |
+| Windows x64 | `bin/win32-x64` |
 
-发布到 npm 后，推荐直接使用 `npx`，无需全局安装：
+`npx` / `npm i` 后由 `npm/launcher.js` 自动选择对应二进制执行。没有覆盖的平台会给出明确报错和 issue 链接；也可自行编译：`cd rust && cargo build --release`。
 
-```bash
-export TAVILY_API_KEYS="key-a,key-b,key-c"
-npx -y @spraylee/tavily-mcp-multi-key@latest
-```
-
-为了避免自动获取未来版本，也可以固定版本：
-
-```bash
-npx -y @spraylee/tavily-mcp-multi-key@0.1.0
-```
-
-如需全局安装：
-
-```bash
-pnpm add --global @spraylee/tavily-mcp-multi-key@latest
-tavily-mcp-multi-key
-```
-
-## 配置
-
-多 Key 使用逗号或换行分隔：
+## 从源码构建（Rust）
 
 ```bash
-export TAVILY_API_KEYS="key-a,key-b,key-c"
+cd rust
+cargo build --release
+cargo test                       # 24 个单元测试
+python3 tests/e2e.py             # 6 场景 E2E（需 python3，起本地 fake API）
+./target/release/tavily-mcp-multi-key --list-tools
 ```
 
-单 Key 旧配置继续支持：
+## 版本历史
 
-```bash
-export TAVILY_API_KEY="key-a"
-npx -y @spraylee/tavily-mcp-multi-key@latest
-```
-
-如果同时配置两个变量，非空的 `TAVILY_API_KEYS` 优先。
-
-官方的 `DEFAULT_PARAMETERS` 和 `TAVILY_HUMAN_ID` 环境变量继续支持。`TAVILY_API_BASE_URL` 仅用于测试或连接兼容 Tavily API 的代理，默认值为 `https://api.tavily.com`。
-
-### Codex
-
-命令行添加：
-
-```bash
-codex mcp add tavily \
-  --env "TAVILY_API_KEYS=key-a,key-b,key-c" \
-  -- npx -y @spraylee/tavily-mcp-multi-key@latest
-```
-
-也可以手动编辑 `~/.codex/config.toml`：
-
-```toml
-[mcp_servers.tavily]
-command = "npx"
-args = ["-y", "@spraylee/tavily-mcp-multi-key@latest"]
-
-[mcp_servers.tavily.env]
-TAVILY_API_KEYS = "key-a,key-b,key-c"
-```
-
-### Claude Code
-
-命令行添加：
-
-```bash
-claude mcp add --scope user tavily \
-  --env "TAVILY_API_KEYS=key-a,key-b,key-c" \
-  -- npx -y @spraylee/tavily-mcp-multi-key@latest
-```
-
-也可以手动编辑用户级 `~/.claude.json`，或项目级 `.mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "tavily": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@spraylee/tavily-mcp-multi-key@latest"],
-      "env": {
-        "TAVILY_API_KEYS": "key-a,key-b,key-c"
-      }
-    }
-  }
-}
-```
-
-### Cursor / Claude Desktop
-
-```json
-{
-  "mcpServers": {
-    "tavily": {
-      "command": "npx",
-      "args": ["-y", "@spraylee/tavily-mcp-multi-key@latest"],
-      "env": {
-        "TAVILY_API_KEYS": "key-a,key-b,key-c"
-      }
-    }
-  }
-}
-```
-
-不要把真实凭证提交到 Git。可以复制 `.env.example` 到 `.env` 做本地测试；MCP 客户端配置中的环境变量不会写入本项目。
-
-## 本地开发
-
-环境要求：Node.js 20+、pnpm。
-
-```bash
-pnpm install
-pnpm build
-pnpm test
-pnpm exec node build/index.js --list-tools
-```
-
-测试使用本地 fake Tavily HTTP 服务，不会调用真实 API，也不需要真实 Key。
-
-查看 MCP Inspector：
-
-```bash
-pnpm inspector
-```
-
-打包预览：
-
-```bash
-pnpm pack --dry-run
-```
-
-本地源码临时接入 Codex，不需要先发布 npm：
-
-```bash
-cd /path/to/tavily-mcp-multi-key
-pnpm build
-export TAVILY_API_KEYS="key-a,key-b"
-codex mcp add tavily-local \
-  --env "TAVILY_API_KEYS=$TAVILY_API_KEYS" \
-  -- node /path/to/tavily-mcp-multi-key/build/index.js
-```
-
-测试完成后移除临时配置：
-
-```bash
-codex mcp remove tavily-local
-```
-
-## 上游维护
-
-本项目保留官方源码作为基线，官方仓库配置为 Git remote `upstream`：
-
-```bash
-git fetch upstream
-git log --oneline upstream/main -5
-```
-
-同步后必须检查 `src/index.ts` 的工具 Schema、认证请求和 `research` 流程，并重新执行：
-
-```bash
-pnpm build
-pnpm test
-```
-
-## 与远程 Tavily MCP 的区别
-
-这是本地 stdio MCP，不包含 Tavily 远程 MCP 的 OAuth 登录流程。它适合 Codex、Cursor 等通过 `command` 启动 MCP 的场景；远程 URL、`mcp-remote` 和 OAuth 不参与本地 Key 轮换。
-
-## 版本与发布
-
-项目使用 SemVer：
-
-- `patch`：修复问题，例：`0.1.0` → `0.1.1`。
-- `minor`：增加向后兼容的功能，例：`0.1.0` → `0.2.0`。
-- `major`：包含不兼容变更，例：`0.1.0` → `1.0.0`。
-
-首次发布前登录 npm 并确认当前账号：
-
-```bash
-npm login
-npm whoami
-```
-
-当前版本 `0.1.0` 可按以下流程首次发布：
-
-```bash
-pnpm build
-pnpm test
-pnpm pack --dry-run
-pnpm publish --access public
-```
-
-后续发布新版本时，先升级版本号。`--no-git-tag-version` 不会自动创建 Git 提交和 Tag，便于检查 diff 后自行提交：
-
-```bash
-# 选择一个：patch、minor 或 major
-pnpm version patch --no-git-tag-version
-git diff -- package.json pnpm-lock.yaml
-pnpm build
-pnpm test
-# 将示例版本替换为本次实际版本
-git add package.json
-git commit -m "release: v0.1.1"
-git tag v0.1.1
-pnpm publish --access public
-```
-
-发布后检查 npm 上的版本：
-
-```bash
-npm view @spraylee/tavily-mcp-multi-key version
-npx -y @spraylee/tavily-mcp-multi-key@latest
-```
-
-如果同时维护 GitHub 个人仓库，可在首次推送前添加个人 remote：
-
-```bash
-git remote add origin git@github.com:spraylee/tavily-mcp-multi-key.git
-git push -u origin main --follow-tags
-```
-
-官方上游仓库继续使用 `upstream`，个人 GitHub 仓库使用 `spraylee`。
-
-如需发布测试版本，可使用 npm dist-tag：
-
-```bash
-pnpm publish --access public --tag next
-```
-
-不要把 API Key 写入 Git、npm 包或发布命令的可公开日志。`pnpm pack --dry-run` 可确认最终包只包含 `build`、README、许可证和包配置。
-
-## 发布前检查
-
-```bash
-pnpm build
-pnpm test
-pnpm pack --dry-run
-git diff --check
-```
-
-在用户确认前，不执行 `git push` 或 `npm publish`。
+- **0.3.0** — Rust 重写：预编译二进制分发；启动 274x、内存 -96%；schema 与 TS 字节级对齐；生命周期防护完整移植
+- 0.2.2 — 修复宿主退出后孤儿进程堆积（issue #2，四层防护）
+- 0.2.1 — 修复 `/usage` 观测面 429 误判；每日重排 + 月度自愈
+- 0.2.0 — 首个多 key 版本：启动排序、故障转移、`tavily_key_status`
