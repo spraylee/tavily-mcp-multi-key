@@ -1,0 +1,182 @@
+name: Release native binaries
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing or new SemVer tag to build, for example v0.4.0"
+        required: true
+        default: "v0.4.0"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(awk -F'"' '$1 ~ /^version = / { print $2; exit }' Cargo.toml)"
+          test -n "$package_version"
+          test "$RELEASE_TAG" = "v$package_version" || {
+            echo "release tag $RELEASE_TAG does not match Cargo.toml version v$package_version" >&2
+            exit 1
+          }
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: tavily-mcp-multi-key
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: tavily-mcp-multi-key
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: tavily-mcp-multi-key
+            cross: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: tavily-mcp-multi-key
+            cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: tavily-mcp-multi-key.exe
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build native binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target "${{ matrix.target }}"
+          else
+            cargo build --release --locked --target "${{ matrix.target }}"
+          fi
+
+      - name: Stage native binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "artifact/${{ matrix.binary }}"
+          chmod 755 "artifact/${{ matrix.binary }}" 2>/dev/null || true
+
+      - name: Upload native binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: artifact/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 3
+
+  package-and-release:
+    name: Package and publish GitHub Release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download native binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Build release archives and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          package_asset() {
+            target="$1"
+            binary="$2"
+            staging="$(mktemp -d)"
+            trap 'rm -rf "$staging"' RETURN
+            cp "artifacts/binary-${target}/${binary}" "$staging/tavily-mcp-multi-key${binary##tavily-mcp-multi-key}"
+            chmod 755 "$staging/tavily-mcp-multi-key"* 2>/dev/null || true
+            tar -C "$staging" -czf "dist/tavily-mcp-multi-key-${RELEASE_TAG}-${target}.tar.gz" "tavily-mcp-multi-key${binary##tavily-mcp-multi-key}"
+            rm -rf "$staging"
+            trap - RETURN
+          }
+
+          package_asset x86_64-unknown-linux-gnu tavily-mcp-multi-key
+          package_asset aarch64-unknown-linux-gnu tavily-mcp-multi-key
+          package_asset aarch64-apple-darwin tavily-mcp-multi-key
+          package_asset x86_64-apple-darwin tavily-mcp-multi-key
+          package_asset x86_64-pc-windows-msvc tavily-mcp-multi-key.exe
+
+          cp scripts/bootstrap.sh dist/bootstrap.sh
+          cp scripts/bootstrap.ps1 dist/bootstrap.ps1
+          chmod 755 dist/bootstrap.sh
+          # Include the bootstrap scripts in the same checksum manifest. The
+          # native bootstrap only consumes the matching archive entry, while
+          # this also lets release review verify every downloadable asset.
+          (cd dist && sha256sum bootstrap.sh bootstrap.ps1 *.tar.gz > SHA256SUMS)
+          printf '%s\n' 'Release files:'
+          ls -lh dist
+
+      - name: Verify release archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/*.tar.gz; do
+            tar -tzf "$archive" | grep -Eq '(^|/)tavily-mcp-multi-key(\.exe)?$'
+          done
+          (cd dist && sha256sum --check SHA256SUMS)
+          test -x dist/bootstrap.sh
+          test -s dist/bootstrap.ps1
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/bootstrap.sh
+            dist/bootstrap.ps1

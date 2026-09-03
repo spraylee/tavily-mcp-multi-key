@@ -1,5 +1,4 @@
 //! Multi-key pool: rotation, cooldown, exhaustion and status snapshots.
-//! Direct port of `src/key-pool.ts` (v0.2.2 semantics).
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -48,10 +47,18 @@ pub struct KeyProbeResult {
 
 impl KeyProbeResult {
     pub fn active() -> Self {
-        KeyProbeResult { status: Some(KeyStatus::Active), remaining: None, cooldown_ms: None }
+        KeyProbeResult {
+            status: Some(KeyStatus::Active),
+            remaining: None,
+            cooldown_ms: None,
+        }
     }
     pub fn active_remaining(remaining: Option<u64>) -> Self {
-        KeyProbeResult { status: Some(KeyStatus::Active), remaining: Some(remaining), cooldown_ms: None }
+        KeyProbeResult {
+            status: Some(KeyStatus::Active),
+            remaining: Some(remaining),
+            cooldown_ms: None,
+        }
     }
     pub fn exhausted() -> Self {
         KeyProbeResult {
@@ -61,10 +68,18 @@ impl KeyProbeResult {
         }
     }
     pub fn invalid() -> Self {
-        KeyProbeResult { status: Some(KeyStatus::Invalid), remaining: None, cooldown_ms: None }
+        KeyProbeResult {
+            status: Some(KeyStatus::Invalid),
+            remaining: None,
+            cooldown_ms: None,
+        }
     }
     pub fn unknown() -> Self {
-        KeyProbeResult { status: None, remaining: None, cooldown_ms: None }
+        KeyProbeResult {
+            status: None,
+            remaining: None,
+            cooldown_ms: None,
+        }
     }
 }
 
@@ -87,7 +102,15 @@ struct KeyRecord {
 /// Mask a key for logging/display: keep prefix and last 4 chars.
 pub fn mask_key(key: &str) -> String {
     if key.len() <= 8 {
-        format!("{}****", &key[..key.char_indices().take(2).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(0)])
+        format!(
+            "{}****",
+            &key[..key
+                .char_indices()
+                .take(2)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0)]
+        )
     } else {
         format!("{}...{}", &key[..8], &key[key.len() - 4..])
     }
@@ -116,7 +139,11 @@ impl KeyPool {
                 available_at: None,
             })
             .collect();
-        KeyPool { records, cooldown_ms, last_probe_at: 0 }
+        KeyPool {
+            records,
+            cooldown_ms,
+            last_probe_at: 0,
+        }
     }
 
     pub fn size(&self) -> usize {
@@ -140,11 +167,15 @@ impl KeyPool {
         F: FnMut(String) -> Fut,
         Fut: Future<Output = ProbeOutcome>,
     {
-        let keys: Vec<String> = self.records.iter().map(|record| record.key.clone()).collect();
-        let futs: Vec<_> = keys.into_iter().map(|key| probe_key(key)).collect();
+        let keys: Vec<String> = self
+            .records
+            .iter()
+            .map(|record| record.key.clone())
+            .collect();
+        let futs: Vec<_> = keys.into_iter().map(&mut probe_key).collect();
         let outcomes = join_all(futs).await;
 
-        for (record, outcome) in self.records.iter_mut().zip(outcomes.into_iter()) {
+        for (record, outcome) in self.records.iter_mut().zip(outcomes) {
             match outcome {
                 ProbeOutcome::NetworkError => {
                     // Network-level failure to reach /usage says nothing about
@@ -152,8 +183,11 @@ impl KeyPool {
                     if record.status == KeyStatus::Active {
                         // stays active
                     }
-                    record.available_at =
-                        if record.status == KeyStatus::Cooldown { record.available_at } else { None };
+                    record.available_at = if record.status == KeyStatus::Cooldown {
+                        record.available_at
+                    } else {
+                        None
+                    };
                 }
                 ProbeOutcome::Result(result) => Self::apply_probe(record, result, self.cooldown_ms),
             }
@@ -182,7 +216,7 @@ impl KeyPool {
         record.status = status;
         record.remaining = result.remaining;
         record.available_at = if status == KeyStatus::Cooldown {
-            Some(now_ms() + result.cooldown_ms.unwrap_or(cooldown_ms).max(0))
+            Some(now_ms() + result.cooldown_ms.unwrap_or(cooldown_ms))
         } else {
             None
         };
@@ -207,7 +241,9 @@ impl KeyPool {
 
     pub fn mark_failure(&mut self, key: &str, status: Option<u16>, retry_after_ms: Option<u64>) {
         let cooldown_ms = self.cooldown_ms;
-        let Some(record) = self.find_mut(key) else { return };
+        let Some(record) = self.find_mut(key) else {
+            return;
+        };
 
         match status {
             Some(401) => {
@@ -223,7 +259,7 @@ impl KeyPool {
             }
             Some(429) => {
                 record.status = KeyStatus::Cooldown;
-                record.available_at = Some(now_ms() + retry_after_ms.unwrap_or(cooldown_ms).max(0));
+                record.available_at = Some(now_ms() + retry_after_ms.unwrap_or(cooldown_ms));
             }
             _ => {}
         }
@@ -313,8 +349,8 @@ impl KeyRecord {
 
 fn remaining_rank(remaining: &Option<Option<u64>>) -> i64 {
     match remaining {
-        None => i64::MIN,          // never learned
-        Some(None) => i64::MAX,    // unlimited
+        None => i64::MIN,       // never learned
+        Some(None) => i64::MAX, // unlimited
         Some(Some(n)) => *n as i64,
     }
 }
@@ -324,15 +360,10 @@ mod tests {
     use super::*;
 
     fn pool(keys: &[&str]) -> KeyPool {
-        KeyPool::new(keys.iter().map(|k| k.to_string()).collect(), DEFAULT_COOLDOWN_MS)
-    }
-
-    fn ok(status: KeyStatus) -> ProbeOutcome {
-        ProbeOutcome::Result(KeyProbeResult {
-            status: Some(status),
-            remaining: None,
-            cooldown_ms: None,
-        })
+        KeyPool::new(
+            keys.iter().map(|k| k.to_string()).collect(),
+            DEFAULT_COOLDOWN_MS,
+        )
     }
 
     fn ok_with_remaining(status: KeyStatus, remaining: Option<u64>) -> ProbeOutcome {
@@ -381,7 +412,8 @@ mod tests {
     async fn probe_unknown_marks_active() {
         let mut p = pool(&["tvly-a"]);
         p.mark_failure("tvly-a", Some(432), None); // exhausted first
-        p.probe(|_| async { ProbeOutcome::Result(KeyProbeResult::unknown()) }).await;
+        p.probe(|_| async { ProbeOutcome::Result(KeyProbeResult::unknown()) })
+            .await;
         assert_eq!(p.next_key().unwrap(), "tvly-a");
     }
 
@@ -406,7 +438,7 @@ mod tests {
         p.mark_failure("tvly-a", Some(401), None); // invalid
         assert_eq!(p.next_key().unwrap(), "tvly-b");
         p.mark_success("tvly-a"); // does not resurrect invalid (mark_success only clears cooldown-ish state)
-        // ...but per TS semantics markSuccess sets active unconditionally:
+                                  // ...but per TS semantics markSuccess sets active unconditionally:
         assert_eq!(p.next_key().unwrap(), "tvly-a");
     }
 
@@ -440,11 +472,12 @@ mod tests {
         assert!(msg.contains("#1 exhausted, remaining=0"), "got: {msg}");
     }
 
-
+    #[tokio::test]
     async fn stale_probe_detection() {
         let mut p = pool(&["tvly-a"]);
         assert!(p.probe_is_stale(1)); // never probed → stale
-        p.probe(|_| async { ok(KeyStatus::Active) }).await;
+        p.probe(|_| async { ProbeOutcome::Result(KeyProbeResult::active()) })
+            .await;
         assert!(!p.probe_is_stale(600_000));
     }
 }

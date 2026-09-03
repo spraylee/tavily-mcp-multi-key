@@ -1,4 +1,4 @@
-//! Tavily MCP multi-key server (Rust rewrite of the TypeScript v0.2.2).
+//! Tavily MCP multi-key server.
 //! stdio server with key rotation, daily re-probe, and the full lifecycle
 //! safety net from issue #2: stdin EOF, SIGTERM/SIGINT/SIGHUP, orphan
 //! self-check, and timer tasks that die with the service.
@@ -96,9 +96,15 @@ impl rmcp::ServerHandler for TavilyMcp {
                     .cloned()
                     .unwrap_or_default();
                 rmcp::model::Tool {
-                    name: definition["name"].as_str().unwrap_or_default().to_string().into(),
+                    name: definition["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                        .into(),
                     title: None,
-                    description: definition["description"].as_str().map(|s| s.to_string().into()),
+                    description: definition["description"]
+                        .as_str()
+                        .map(|s| s.to_string().into()),
                     input_schema: Arc::new(schema_map),
                     output_schema: None,
                     annotations: None,
@@ -124,8 +130,13 @@ impl rmcp::ServerHandler for TavilyMcp {
         };
 
         let mut client = self.client.lock().await;
-        let outcome = dispatch(&name, &args, &mut client, (self.reprobe_hour, self.reprobe_tz.clone()))
-            .await;
+        let outcome = dispatch(
+            &name,
+            &args,
+            &mut client,
+            (self.reprobe_hour, self.reprobe_tz.clone()),
+        )
+        .await;
         let output = match outcome {
             Ok(output) => output,
             Err(error) => render_tool_error(&name, error),
@@ -194,9 +205,15 @@ async fn signal_watch(shutdown: watch::Sender<bool>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let Ok(mut sigterm) = signal(SignalKind::terminate()) else { return };
-        let Ok(mut sigint) = signal(SignalKind::interrupt()) else { return };
-        let Ok(mut sighup) = signal(SignalKind::hangup()) else { return };
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            return;
+        };
+        let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
+            return;
+        };
+        let Ok(mut sighup) = signal(SignalKind::hangup()) else {
+            return;
+        };
 
         tokio::select! {
             _ = sigterm.recv() => eprintln!("[tavily-mcp-multi-key] shutting down (SIGTERM)"),
@@ -236,8 +253,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reprobe_tick_ms = clamp_u32("TAVILY_REPROBE_TICK_MS", 1_000, 3_600_000, 60_000) as u64;
     let orphan_check_ms = clamp_u32("TAVILY_ORPHAN_CHECK_MS", 0, 3_600_000, 60_000) as u64;
 
-    let base_url = std::env::var("TAVILY_API_BASE_URL")
-        .unwrap_or_else(|_| "https://api.tavily.com".into());
+    let base_url =
+        std::env::var("TAVILY_API_BASE_URL").unwrap_or_else(|_| "https://api.tavily.com".into());
     let human_id = std::env::var("TAVILY_HUMAN_ID").ok();
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -256,7 +273,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     if !keyless {
-        client.lock().await.probe_all_keys("startup preflight").await;
+        client
+            .lock()
+            .await
+            .probe_all_keys("startup preflight")
+            .await;
         tokio::spawn(daily_reprobe(
             client.clone(),
             reprobe_hour,
@@ -271,7 +292,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // still not leave us lingering. TS parity: INITIAL_PPID snapshot + timers
     // live from module load, independent of transport state.
     tokio::spawn(signal_watch(shutdown_tx.clone()));
-    tokio::spawn(orphan_watchdog(initial_ppid, orphan_check_ms, shutdown_tx.clone()));
+    tokio::spawn(orphan_watchdog(
+        initial_ppid,
+        orphan_check_ms,
+        shutdown_tx.clone(),
+    ));
 
     let handler = TavilyMcp {
         client: client.clone(),

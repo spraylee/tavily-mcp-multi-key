@@ -1,17 +1,31 @@
-//! Tool definitions (byte-parity schemas with the TS version), dispatch and
-//! output formatters. Port of the handler half of `src/index.ts`.
+//! Tool definitions, dispatch and output formatters.
 
 use serde_json::{json, Map, Value};
 
 use crate::key_pool::now_ms;
-use crate::tavily::{is_keyless_envelope, format_keyless_envelope, ToolError, TavilyClient};
+use crate::tavily::{format_keyless_envelope, is_keyless_envelope, TavilyClient, ToolError};
 
 pub const DOCS_URLS: &[(&str, &str)] = &[
-    ("search", "https://docs.tavily.com/documentation/api-reference/endpoint/search"),
-    ("extract", "https://docs.tavily.com/documentation/api-reference/endpoint/extract"),
-    ("crawl", "https://docs.tavily.com/documentation/api-reference/endpoint/crawl"),
-    ("map", "https://docs.tavily.com/documentation/api-reference/endpoint/map"),
-    ("research", "https://docs.tavily.com/documentation/api-reference/endpoint/research"),
+    (
+        "search",
+        "https://docs.tavily.com/documentation/api-reference/endpoint/search",
+    ),
+    (
+        "extract",
+        "https://docs.tavily.com/documentation/api-reference/endpoint/extract",
+    ),
+    (
+        "crawl",
+        "https://docs.tavily.com/documentation/api-reference/endpoint/crawl",
+    ),
+    (
+        "map",
+        "https://docs.tavily.com/documentation/api-reference/endpoint/map",
+    ),
+    (
+        "research",
+        "https://docs.tavily.com/documentation/api-reference/endpoint/research",
+    ),
 ];
 
 /// Tool result handed back to the MCP layer.
@@ -22,10 +36,16 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     fn ok(text: String) -> Self {
-        ToolOutput { text, is_error: false }
+        ToolOutput {
+            text,
+            is_error: false,
+        }
     }
     fn err(text: String) -> Self {
-        ToolOutput { text, is_error: true }
+        ToolOutput {
+            text,
+            is_error: true,
+        }
     }
 }
 
@@ -455,8 +475,14 @@ pub fn format_results(response: &Value) -> String {
     if let Some(results) = response.get("results").and_then(|v| v.as_array()) {
         for result in results {
             output.push(String::new());
-            output.push(format!("Title: {}", result.get("title").and_then(|v| v.as_str()).unwrap_or("")));
-            output.push(format!("URL: {}", result.get("url").and_then(|v| v.as_str()).unwrap_or("")));
+            output.push(format!(
+                "Title: {}",
+                result.get("title").and_then(|v| v.as_str()).unwrap_or("")
+            ));
+            output.push(format!(
+                "URL: {}",
+                result.get("url").and_then(|v| v.as_str()).unwrap_or("")
+            ));
             output.push(format!(
                 "Content: {}",
                 result.get("content").and_then(|v| v.as_str()).unwrap_or("")
@@ -506,14 +532,24 @@ pub fn format_crawl_results(response: &Value) -> String {
     let mut output: Vec<String> = Vec::new();
 
     output.push("Crawl Results:".to_string());
-    output.push(format!("Base URL: {}", response.get("base_url").and_then(|v| v.as_str()).unwrap_or("")));
+    output.push(format!(
+        "Base URL: {}",
+        response
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    ));
 
     output.push(String::new());
     output.push("Crawled Pages:".to_string());
     if let Some(results) = response.get("results").and_then(|v| v.as_array()) {
         for (index, page) in results.iter().enumerate() {
             output.push(String::new());
-            output.push(format!("[{}] URL: {}", index + 1, page.get("url").and_then(|v| v.as_str()).unwrap_or("")));
+            output.push(format!(
+                "[{}] URL: {}",
+                index + 1,
+                page.get("url").and_then(|v| v.as_str()).unwrap_or("")
+            ));
             if let Some(raw) = page.get("raw_content").and_then(|v| v.as_str()) {
                 if !raw.is_empty() {
                     let preview = if raw.chars().count() > 200 {
@@ -540,7 +576,13 @@ pub fn format_map_results(response: &Value) -> String {
     let mut output: Vec<String> = Vec::new();
 
     output.push("Site Map Results:".to_string());
-    output.push(format!("Base URL: {}", response.get("base_url").and_then(|v| v.as_str()).unwrap_or("")));
+    output.push(format!(
+        "Base URL: {}",
+        response
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    ));
 
     output.push(String::new());
     output.push("Mapped Pages:".to_string());
@@ -590,7 +632,7 @@ pub fn format_key_status(
                 .and_then(|v| v.as_u64())
                 .map(|at| {
                     let seconds = at.saturating_sub(now_ms()) / 1000;
-                    format!(", available in {}s", seconds.max(0))
+                    format!(", available in {}s", seconds)
                 })
                 .unwrap_or_default()
         } else {
@@ -711,7 +753,10 @@ mod tests {
             "remaining": 900
         })];
         let text = format_key_status(&snapshots, 0, 5, "Asia/Shanghai");
-        assert!(text.contains("#1 tvly-ab...1234 — active, remaining=900") || text.contains("remaining=900"));
+        assert!(
+            text.contains("#1 tvly-ab...1234 — active, remaining=900")
+                || text.contains("remaining=900")
+        );
         assert!(text.contains("Last probed: never"));
         assert!(text.contains("Daily re-probe: 05:00 Asia/Shanghai"));
     }

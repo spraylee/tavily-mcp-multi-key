@@ -1,22 +1,17 @@
-FROM node:22.12-alpine AS builder
-
-COPY . /app
+FROM rust:1-bookworm AS builder
 
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-RUN --mount=type=cache,target=/root/.npm npm install
+RUN cargo build --release --locked
 
-FROM node:22-alpine AS release
+FROM debian:bookworm-slim AS runtime
 
-WORKDIR /app
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/build /app/build
-COPY --from=builder /app/package.json /app/package.json
-COPY --from=builder /app/package-lock.json /app/package-lock.json
+COPY --from=builder /app/target/release/tavily-mcp-multi-key /usr/local/bin/tavily-mcp-multi-key
 
-ENV NODE_ENV=production
-ENV TAVILY_API_KEY=your-api-key-here
-
-RUN npm ci --ignore-scripts --omit-dev
-
-ENTRYPOINT ["node", "build/index.js"]
+ENTRYPOINT ["/usr/local/bin/tavily-mcp-multi-key"]

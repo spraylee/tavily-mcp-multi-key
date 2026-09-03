@@ -1,0 +1,50 @@
+name: Native CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Rust tests and bootstrap E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run unit tests
+        run: cargo test --locked
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Run fake-API MCP E2E
+        run: python3 tests/e2e.py
+
+      - name: Run bootstrap download/cache E2E
+        run: python3 tests/bootstrap.py
+
+      - name: Run eval-form inline launch E2E
+        run: python3 tests/eval_form.py

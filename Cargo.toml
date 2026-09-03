@@ -1,9 +1,10 @@
 [package]
 name = "tavily-mcp-multi-key"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
-description = "Tavily MCP server with multi-key rotation (Rust rewrite of the TypeScript original)"
+description = "Tavily MCP server with multi-key rotation"
 license = "MIT"
+repository = "https://github.com/spraylee/tavily-mcp-multi-key"
 
 [[bin]]
 name = "tavily-mcp-multi-key"
@@ -19,9 +20,6 @@ futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"
-
-[dev-dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 
 [profile.release]
 opt-level = "z"

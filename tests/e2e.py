@@ -19,7 +19,8 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BIN = "/root/.openclaw/workspace/tavily-mcp-multi-key/rust/target/release/tavily-mcp-multi-key"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BIN = os.path.join(REPO, "target", "release", "tavily-mcp-multi-key")
 PORT = 18733
 BASE = f"http://127.0.0.1:{PORT}"
 

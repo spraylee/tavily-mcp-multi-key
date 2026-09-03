@@ -1,13 +1,9 @@
-node_modules/
-build/
 .env
 .env.local
 .env.*.local
 !.env.example
 
-package-lock.json
-
-# rust build artifacts
-bin/
-rust/target/
+# Generated/build artifacts
+/target/
 __pycache__/
+*.pyc

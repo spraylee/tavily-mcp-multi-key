@@ -1,5 +1,4 @@
 //! Tavily REST client with multi-key rotation, research polling/streaming.
-//! Port of the request layer in `src/index.ts` (v0.2.2).
 
 use std::time::Duration;
 
@@ -22,7 +21,11 @@ pub struct ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.status {
-            Some(status) => write!(f, "Request failed with status code {status}: {}", self.detail),
+            Some(status) => write!(
+                f,
+                "Request failed with status code {status}: {}",
+                self.detail
+            ),
             None => write!(f, "{}", self.detail),
         }
     }
@@ -30,7 +33,11 @@ impl std::fmt::Display for ApiError {
 
 impl ApiError {
     pub fn from_reqwest(err: &reqwest::Error) -> Self {
-        ApiError { status: err.status().map(|s| s.as_u16()), detail: err.to_string(), body: None }
+        ApiError {
+            status: err.status().map(|s| s.as_u16()),
+            detail: err.to_string(),
+            body: None,
+        }
     }
 }
 
@@ -74,7 +81,12 @@ pub struct TavilyClient {
 }
 
 impl TavilyClient {
-    pub fn new(api_keys: Vec<String>, base_url: &str, session_id: &str, human_id: Option<&str>) -> Self {
+    pub fn new(
+        api_keys: Vec<String>,
+        base_url: &str,
+        session_id: &str,
+        human_id: Option<&str>,
+    ) -> Self {
         let keyless = api_keys.is_empty();
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("accept", "application/json".parse().unwrap());
@@ -94,14 +106,14 @@ impl TavilyClient {
             .expect("reqwest client");
         TavilyClient {
             http,
-            key_pool: if keyless { None } else { Some(KeyPool::new(api_keys, DEFAULT_COOLDOWN_MS)) },
+            key_pool: if keyless {
+                None
+            } else {
+                Some(KeyPool::new(api_keys, DEFAULT_COOLDOWN_MS))
+            },
             base_url: base_url.trim_end_matches('/').to_string(),
             keyless,
         }
-    }
-
-    pub fn is_keyless(&self) -> bool {
-        self.keyless
     }
 
     fn auth_headers(&self, api_key: Option<&str>) -> reqwest::header::HeaderMap {
@@ -145,9 +157,15 @@ impl TavilyClient {
         if let Some(body) = body {
             builder = builder.json(&body);
         }
-        let response = builder.send().await.map_err(|e| ApiError::from_reqwest(&e))?;
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| ApiError::from_reqwest(&e))?;
         let status = response.status();
-        let text = response.text().await.map_err(|e| ApiError::from_reqwest(&e))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|e| ApiError::from_reqwest(&e))?;
         let parsed: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
 
         if !status.is_success() {
@@ -161,24 +179,11 @@ impl TavilyClient {
         Ok(parsed)
     }
 
-    /// Probe one key against GET /usage (5s timeout, as the TS version).
-    pub async fn probe_key(&self, api_key: &str) -> ProbeOutcome {
-        let url = format!("{}/usage", self.base_url);
-        match self.request(Method::GET, &url, None, Some(api_key), Duration::from_secs(5)).await {
-            Ok(data) => ProbeOutcome::Result(usage_to_probe_result(&data)),
-            Err(err) => match err.status {
-                Some(401) => ProbeOutcome::Result(KeyProbeResult::invalid()),
-                Some(432) | Some(433) => ProbeOutcome::Result(KeyProbeResult::exhausted()),
-                // 429 (or anything else) on /usage rate-limits the observation
-                // plane only — the data plane may still be fine. Keep state.
-                _ => ProbeOutcome::Result(KeyProbeResult::unknown()),
-            },
-        }
-    }
-
     /// Probe every key and log a summary line to stderr.
     pub async fn probe_all_keys(&mut self, reason: &str) {
-        let Some(pool) = self.key_pool.as_mut() else { return };
+        let Some(pool) = self.key_pool.as_mut() else {
+            return;
+        };
         let base_url = self.base_url.clone();
         let http = self.http.clone();
         pool.probe(|key| {
@@ -236,7 +241,8 @@ impl TavilyClient {
                         .map(|p| p.probe_is_stale(STALE_PROBE_MS))
                         .unwrap_or(false);
                     if stale {
-                        self.probe_all_keys("all keys unavailable — stale probe check").await;
+                        self.probe_all_keys("all keys unavailable — stale probe check")
+                            .await;
                         continue;
                     }
                     break;
@@ -275,21 +281,37 @@ impl TavilyClient {
         }
     }
 
-    async fn execute(&self, operation: Operation, api_key: Option<String>) -> Result<Value, ToolError> {
+    async fn execute(
+        &self,
+        operation: Operation,
+        api_key: Option<String>,
+    ) -> Result<Value, ToolError> {
         match operation {
             Operation::Search { params } => {
                 let payload = self.add_api_key(clean_search_params(&params), api_key.as_deref());
                 let url = format!("{}/search", self.base_url);
-                self.request(Method::POST, &url, Some(payload), api_key.as_deref(), Duration::from_secs(60))
-                    .await
-                    .map_err(ToolError::Api)
+                self.request(
+                    Method::POST,
+                    &url,
+                    Some(payload),
+                    api_key.as_deref(),
+                    Duration::from_secs(60),
+                )
+                .await
+                .map_err(ToolError::Api)
             }
             Operation::Endpoint { endpoint, params } => {
                 let payload = self.add_api_key(params, api_key.as_deref());
                 let url = format!("{}/{endpoint}", self.base_url);
-                self.request(Method::POST, &url, Some(payload), api_key.as_deref(), Duration::from_secs(300))
-                    .await
-                    .map_err(ToolError::Api)
+                self.request(
+                    Method::POST,
+                    &url,
+                    Some(payload),
+                    api_key.as_deref(),
+                    Duration::from_secs(300),
+                )
+                .await
+                .map_err(ToolError::Api)
             }
             Operation::Research { params } => research_with_key(self, params, api_key).await,
         }
@@ -302,7 +324,11 @@ impl TavilyClient {
     }
 
     /// extract / crawl / map share one shape: POST params to /<endpoint>.
-    pub async fn simple_endpoint(&mut self, endpoint: &str, params: Value) -> Result<Value, ToolError> {
+    pub async fn simple_endpoint(
+        &mut self,
+        endpoint: &str,
+        params: Value,
+    ) -> Result<Value, ToolError> {
         self.run_with_key(Operation::Endpoint {
             endpoint: endpoint.to_string(),
             params,
@@ -322,12 +348,6 @@ pub enum Operation {
     Search { params: Value },
     Endpoint { endpoint: String, params: Value },
     Research { params: Value },
-}
-
-// The pool probe closure needs &self.http while &mut pool is held, so expose
-// a standalone probe using only the pieces it needs.
-fn self_http() -> Client {
-    unreachable!("replaced by probe_usage threaded through probe_all_keys v2")
 }
 
 async fn probe_usage(http: &Client, base_url: &str, api_key: &str) -> ProbeOutcome {
@@ -369,7 +389,10 @@ pub fn usage_to_probe_result(data: &Value) -> KeyProbeResult {
     let key_limit_is_number = key_limit.as_ref().is_some_and(|v| v.as_f64().is_some());
 
     let (usage, limit) = if key_limit_is_number {
-        (data.pointer("/key/usage").and_then(|v| v.as_f64()), key_limit)
+        (
+            data.pointer("/key/usage").and_then(|v| v.as_f64()),
+            key_limit,
+        )
     } else {
         (
             data.pointer("/account/plan_usage").and_then(|v| v.as_f64()),
@@ -377,8 +400,12 @@ pub fn usage_to_probe_result(data: &Value) -> KeyProbeResult {
         )
     };
 
-    let Some(usage) = usage else { return KeyProbeResult::active() };
-    let Some(limit_value) = limit else { return KeyProbeResult::active() };
+    let Some(usage) = usage else {
+        return KeyProbeResult::active();
+    };
+    let Some(limit_value) = limit else {
+        return KeyProbeResult::active();
+    };
     let limit = match limit_value {
         Value::Null => return KeyProbeResult::active_remaining(None), // unlimited
         v => match v.as_f64() {
@@ -430,9 +457,15 @@ pub fn clean_search_params(params: &Value) -> Value {
     }
 
     // start/end dates and time_range are mutually exclusive at the API.
-    let has_dates = search_params.get("start_date").is_some_and(|v| !v.is_null())
+    let has_dates = search_params
+        .get("start_date")
+        .is_some_and(|v| !v.is_null())
         || search_params.get("end_date").is_some_and(|v| !v.is_null());
-    if has_dates && search_params.get("time_range").is_some_and(|v| !v.is_null()) {
+    if has_dates
+        && search_params
+            .get("time_range")
+            .is_some_and(|v| !v.is_null())
+    {
         search_params["time_range"] = Value::Null;
     }
 
@@ -481,8 +514,14 @@ fn detail_to_string(detail: &Value) -> String {
 
 /// Render the Tavily keyless recoverable-error envelope as plain text.
 pub fn format_keyless_envelope(data: &Value) -> String {
-    let Some(err) = data.get("error") else { return String::new() };
-    let mut lines: Vec<String> = vec![err.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string()];
+    let Some(err) = data.get("error") else {
+        return String::new();
+    };
+    let mut lines: Vec<String> = vec![err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()];
     if let Some(retry) = err.get("retry_after_seconds") {
         if !retry.is_null() {
             lines.push(format!("Retry after: {retry}s"));
@@ -497,26 +536,37 @@ pub fn format_keyless_envelope(data: &Value) -> String {
                 match action_type {
                     "agentic_payment" => lines.push(format!(
                         "- Agentic payment ({}): {}",
-                        action.get("scheme").and_then(|v| v.as_str()).unwrap_or("x402"),
+                        action
+                            .get("scheme")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("x402"),
                         action.get("details").and_then(|v| v.as_str()).unwrap_or("")
                     )),
                     "signup" => lines.push(format!(
                         "- Sign up for a Tavily API key: {}",
                         action.get("url").and_then(|v| v.as_str()).unwrap_or("")
                     )),
-                    "bonus_credits" => {
-                        if action.get("eligible").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            lines.push(format!(
-                                "- Earn {} bonus credits by POSTing answers to {}",
-                                action.get("credits_on_completion").map(|v| v.to_string()).unwrap_or_default(),
-                                action.get("endpoint").and_then(|v| v.as_str()).unwrap_or("")
-                            ));
-                            if let Some(questions) =
-                                action.get("questions").and_then(|v| v.as_array())
-                            {
-                                for (i, question) in questions.iter().enumerate() {
-                                    lines.push(format!("    {}. {}", i + 1, question));
-                                }
+                    "bonus_credits"
+                        if action
+                            .get("eligible")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false) =>
+                    {
+                        lines.push(format!(
+                            "- Earn {} bonus credits by POSTing answers to {}",
+                            action
+                                .get("credits_on_completion")
+                                .map(|v| v.to_string())
+                                .unwrap_or_default(),
+                            action
+                                .get("endpoint")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                        ));
+                        if let Some(questions) = action.get("questions").and_then(|v| v.as_array())
+                        {
+                            for (i, question) in questions.iter().enumerate() {
+                                lines.push(format!("    {}. {}", i + 1, question));
                             }
                         }
                     }
@@ -525,7 +575,11 @@ pub fn format_keyless_envelope(data: &Value) -> String {
             }
         }
     }
-    lines.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    lines
+        .into_iter()
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 pub fn is_keyless_envelope(data: Option<&Value>) -> bool {
@@ -544,8 +598,16 @@ async fn research_with_key(
     params: Value,
     api_key: Option<String>,
 ) -> Result<Value, ToolError> {
-    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
-    let input = params.get("input").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let model = params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
+    let input = params
+        .get("input")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     let create_body = json!({ "input": input, "model": model });
     let url = format!("{}/research", client.base_url);
@@ -563,7 +625,8 @@ async fn research_with_key(
         Err(err) => {
             // 400 research_stream_required → transparent stream fallback.
             if err.status == Some(400)
-                && err.body
+                && err
+                    .body
                     .as_ref()
                     .and_then(|b| b.pointer("/detail/error_code"))
                     .and_then(|v| v.as_str())
@@ -576,7 +639,9 @@ async fn research_with_key(
     };
 
     let Some(request_id) = created.get("request_id").and_then(|v| v.as_str()) else {
-        return Ok(json!({ "error": format!("No request_id returned from research endpoint. Documentation: {RESEARCH_DOCS}") }));
+        return Ok(
+            json!({ "error": format!("No request_id returned from research endpoint. Documentation: {RESEARCH_DOCS}") }),
+        );
     };
 
     let max_poll_ms: u64 = if model == "mini" { 300_000 } else { 900_000 };
@@ -589,11 +654,20 @@ async fn research_with_key(
 
         let poll_url = format!("{}/research/{}", client.base_url, request_id);
         match client
-            .request(Method::GET, &poll_url, None, api_key.as_deref(), Duration::from_secs(30))
+            .request(
+                Method::GET,
+                &poll_url,
+                None,
+                api_key.as_deref(),
+                Duration::from_secs(30),
+            )
             .await
         {
             Ok(body) => {
-                let status = body.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+                let status = body
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 match status {
                     "completed" => {
                         return Ok(json!({
@@ -601,7 +675,9 @@ async fn research_with_key(
                         }));
                     }
                     "failed" => {
-                        return Ok(json!({ "error": format!("Research task failed. Documentation: {RESEARCH_DOCS}") }));
+                        return Ok(
+                            json!({ "error": format!("Research task failed. Documentation: {RESEARCH_DOCS}") }),
+                        );
                     }
                     _ => {}
                 }
@@ -628,7 +704,11 @@ async fn research_via_stream(
 ) -> Result<Value, ToolError> {
     use futures::StreamExt;
 
-    let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
+    let model = params
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
     let max_stream_ms: u64 = if model == "mini" { 300_000 } else { 900_000 };
     let url = format!("{}/research", client.base_url);
     let body = json!({
@@ -653,7 +733,9 @@ async fn research_via_stream(
             if is_key_rotation_status(status) {
                 return Err(ToolError::Api(ApiError::from_reqwest(&err)));
             }
-            return Ok(json!({ "error": format!("Research stream request failed: {err}. Documentation: {RESEARCH_DOCS}") }));
+            return Ok(
+                json!({ "error": format!("Research stream request failed: {err}. Documentation: {RESEARCH_DOCS}") }),
+            );
         }
     };
 
@@ -664,7 +746,8 @@ async fn research_via_stream(
         let detail = serde_json::from_str::<Value>(&text)
             .ok()
             .map(|parsed| {
-                serde_json::to_string(parsed.get("detail").unwrap_or(&parsed)).unwrap_or(text.clone())
+                serde_json::to_string(parsed.get("detail").unwrap_or(&parsed))
+                    .unwrap_or(text.clone())
             })
             .unwrap_or_else(|| text.clone());
         if is_key_rotation_status(Some(status.as_u16())) {
@@ -674,7 +757,9 @@ async fn research_via_stream(
                 body: None,
             }));
         }
-        return Ok(json!({ "error": format!("Research stream request failed (HTTP {}): {}. Documentation: {RESEARCH_DOCS}", status.as_u16(), detail) }));
+        return Ok(
+            json!({ "error": format!("Research stream request failed (HTTP {}): {}. Documentation: {RESEARCH_DOCS}", status.as_u16(), detail) }),
+        );
     }
 
     // SSE consumption with idle + overall budgets.
@@ -753,11 +838,15 @@ fn handle_sse_frame(frame: &str, content: &mut String) -> Option<Value> {
                     other => other.to_string(),
                 })
                 .unwrap_or_else(|| data.clone());
-            Some(json!({ "error": format!("Research stream error: {message}. Documentation: {RESEARCH_DOCS}") }))
+            Some(
+                json!({ "error": format!("Research stream error: {message}. Documentation: {RESEARCH_DOCS}") }),
+            )
         }
         "done" => {
             if content.is_empty() {
-                Some(json!({ "error": format!("Research stream completed without content. Documentation: {RESEARCH_DOCS}") }))
+                Some(
+                    json!({ "error": format!("Research stream completed without content. Documentation: {RESEARCH_DOCS}") }),
+                )
             } else {
                 Some(json!({ "content": content.clone() }))
             }
@@ -767,8 +856,9 @@ fn handle_sse_frame(frame: &str, content: &mut String) -> Option<Value> {
                 return None;
             }
             if let Ok(delta) = serde_json::from_str::<Value>(&data) {
-                if let Some(delta_content) =
-                    delta.pointer("/choices/0/delta/content").and_then(|v| v.as_str())
+                if let Some(delta_content) = delta
+                    .pointer("/choices/0/delta/content")
+                    .and_then(|v| v.as_str())
                 {
                     content.push_str(delta_content);
                 }
@@ -826,13 +916,19 @@ mod tests {
     #[test]
     fn usage_exhausted_when_zero_remaining() {
         let data = json!({"key": {"usage": 1000, "limit": 1000}});
-        assert_eq!(usage_to_probe_result(&data).status, Some(crate::key_pool::KeyStatus::Exhausted));
+        assert_eq!(
+            usage_to_probe_result(&data).status,
+            Some(crate::key_pool::KeyStatus::Exhausted)
+        );
     }
 
     #[test]
     fn usage_missing_numbers_is_active_unknown() {
         let data = json!({"key": {"usage": "oops"}});
-        assert_eq!(usage_to_probe_result(&data).status, Some(crate::key_pool::KeyStatus::Active));
+        assert_eq!(
+            usage_to_probe_result(&data).status,
+            Some(crate::key_pool::KeyStatus::Active)
+        );
         assert_eq!(usage_to_probe_result(&data).remaining, None);
     }
 
@@ -861,9 +957,11 @@ mod tests {
     #[test]
     fn sse_frames_assemble_content() {
         let mut content = String::new();
-        let delta = "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n";
+        let delta =
+            "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n";
         assert!(handle_sse_frame(delta, &mut content).is_none());
-        let delta2 = "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n";
+        let delta2 =
+            "event: message\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n";
         assert!(handle_sse_frame(delta2, &mut content).is_none());
         let done = "event: done\ndata: [DONE]\n\n";
         let outcome = handle_sse_frame(done, &mut content).unwrap();
