@@ -1,6 +1,12 @@
 # tavily-mcp-multi-key
 
+[![Website](https://img.shields.io/badge/website-tavily--mcp.spraylee.com-c1440e?style=flat-square)](https://tavily-mcp.spraylee.com)
+[![Release](https://img.shields.io/github/v/release/spraylee/tavily-mcp-multi-key?style=flat-square)](https://github.com/spraylee/tavily-mcp-multi-key/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-c1440e?style=flat-square)](LICENCE)
+
 基于官方 Tavily MCP 的本地 stdio MCP Server，支持多个 Tavily API Key 的额度感知轮换。
+
+**[→ 官网 tavily-mcp.spraylee.com](https://tavily-mcp.spraylee.com)** — 一页看懂多 key 轮换与各客户端配置。
 
 本项目现在是**纯 Rust 实现**：
 
@@ -22,7 +28,48 @@
 
 ## MCP 客户端配置
 
-### macOS / Linux：GitHub Release 自举（推荐）
+### 方式一：binox 运行（推荐）
+
+先装 [binox](https://binox.spraylee.com)（一行命令，免 Node）：
+
+```sh
+curl -fsSL https://binox.spraylee.com/sh | sh
+```
+
+然后按你的客户端三选一：
+
+**Claude Code**（终端一行）：
+
+```sh
+claude mcp add tavily --env TAVILY_API_KEYS=key1,key2,key3 -- binox spraylee/tavily-mcp-multi-key
+```
+
+**Codex**（写入 `~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.tavily]
+command = "binox"
+args = ["spraylee/tavily-mcp-multi-key"]
+env = { TAVILY_API_KEYS = "key1,key2,key3" }
+```
+
+**通用 JSON 客户端（pi 等）**（写入 `~/.config/mcp/mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "tavily": {
+      "command": "binox",
+      "args": ["spraylee/tavily-mcp-multi-key"],
+      "env": { "TAVILY_API_KEYS": "key1,key2,key3" }
+    }
+  }
+}
+```
+
+binox 每次启动自动探测最新 Release（探测失败回退本地缓存），运行期单进程、无 Node 常驻。想钉死版本：`args` 换成 `["spraylee/tavily-mcp-multi-key@v0.4.1"]`。
+
+### 方式二：GitHub Release 自举（不装 binox）
 
 下面的配置无需预装本项目，也不会让 npm/Node 常驻。每次启动会自动检查 GitHub 最新 Release：有新版本才下载（约 2MB，一次性），没有就用本地缓存秒启；GitHub 连不上时自动降级使用已装版本。
 
@@ -236,7 +283,7 @@ git push origin v0.4.0
 { "command": "npx", "args": ["-y", "@spraylee/tavily-mcp-multi-key"] }
 ```
 
-配置需要替换为上面的 GitHub Release 自举配置。`TAVILY_API_KEY`、`TAVILY_API_KEYS` 和所有 MCP 工具调用方式保持不变；迁移后运行时进程链会从 `npm exec → Rust` 变成一条 `sh`，并在 bootstrap 完成后由 `exec` 变成直接的 Rust 进程。
+配置需要替换为上面的 **binox 运行**（推荐，见[官网](https://tavily-mcp.spraylee.com)三客户端配置）或 GitHub Release 自举配置。`TAVILY_API_KEY`、`TAVILY_API_KEYS` 和所有 MCP 工具调用方式保持不变。
 
 ## Docker
 
